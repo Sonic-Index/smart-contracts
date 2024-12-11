@@ -1,0 +1,276 @@
+{
+	"deploy": {
+		"VM:-": {
+			"linkReferences": {},
+			"autoDeployLib": true
+		},
+		"main:1": {
+			"linkReferences": {},
+			"autoDeployLib": true
+		},
+		"ropsten:3": {
+			"linkReferences": {},
+			"autoDeployLib": true
+		},
+		"rinkeby:4": {
+			"linkReferences": {},
+			"autoDeployLib": true
+		},
+		"kovan:42": {
+			"linkReferences": {},
+			"autoDeployLib": true
+		},
+		"goerli:5": {
+			"linkReferences": {},
+			"autoDeployLib": true
+		},
+		"Custom": {
+			"linkReferences": {},
+			"autoDeployLib": true
+		}
+	},
+	"data": {
+		"bytecode": {
+			"functionDebugData": {},
+			"generatedSources": [],
+			"linkReferences": {},
+			"object": "",
+			"opcodes": "",
+			"sourceMap": ""
+		},
+		"deployedBytecode": {
+			"functionDebugData": {},
+			"generatedSources": [],
+			"immutableReferences": {},
+			"linkReferences": {},
+			"object": "",
+			"opcodes": "",
+			"sourceMap": ""
+		},
+		"gasEstimates": null,
+		"methodIdentifiers": {
+			"balanceOfNFTAt(uint256,uint256)": "e0514aba",
+			"checkpoint()": "c2c4c5c1",
+			"deposit_for(uint256,uint256)": "ee99fe28",
+			"epoch()": "900cf0cf",
+			"isApprovedOrOwner(address,uint256)": "430c2081",
+			"ownerOf(uint256)": "6352211e",
+			"point_history(uint256)": "d1febfb9",
+			"user_point_epoch(uint256)": "e441135c",
+			"user_point_history(uint256,uint256)": "1376f3da"
+		}
+	},
+	"abi": [
+		{
+			"inputs": [
+				{
+					"internalType": "uint256",
+					"name": "tokenId",
+					"type": "uint256"
+				},
+				{
+					"internalType": "uint256",
+					"name": "timestamp",
+					"type": "uint256"
+				}
+			],
+			"name": "balanceOfNFTAt",
+			"outputs": [
+				{
+					"internalType": "uint256",
+					"name": "",
+					"type": "uint256"
+				}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "checkpoint",
+			"outputs": [],
+			"stateMutability": "nonpayable",
+			"type": "function"
+		},
+		{
+			"inputs": [
+				{
+					"internalType": "uint256",
+					"name": "tokenId",
+					"type": "uint256"
+				},
+				{
+					"internalType": "uint256",
+					"name": "value",
+					"type": "uint256"
+				}
+			],
+			"name": "deposit_for",
+			"outputs": [],
+			"stateMutability": "nonpayable",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "epoch",
+			"outputs": [
+				{
+					"internalType": "uint256",
+					"name": "",
+					"type": "uint256"
+				}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [
+				{
+					"internalType": "address",
+					"name": "spender",
+					"type": "address"
+				},
+				{
+					"internalType": "uint256",
+					"name": "tokenId",
+					"type": "uint256"
+				}
+			],
+			"name": "isApprovedOrOwner",
+			"outputs": [
+				{
+					"internalType": "bool",
+					"name": "",
+					"type": "bool"
+				}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [
+				{
+					"internalType": "uint256",
+					"name": "tokenId",
+					"type": "uint256"
+				}
+			],
+			"name": "ownerOf",
+			"outputs": [
+				{
+					"internalType": "address",
+					"name": "",
+					"type": "address"
+				}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [
+				{
+					"internalType": "uint256",
+					"name": "epoch",
+					"type": "uint256"
+				}
+			],
+			"name": "point_history",
+			"outputs": [
+				{
+					"components": [
+						{
+							"internalType": "int128",
+							"name": "bias",
+							"type": "int128"
+						},
+						{
+							"internalType": "int128",
+							"name": "slope",
+							"type": "int128"
+						},
+						{
+							"internalType": "uint256",
+							"name": "ts",
+							"type": "uint256"
+						},
+						{
+							"internalType": "uint256",
+							"name": "blk",
+							"type": "uint256"
+						}
+					],
+					"internalType": "struct IVeSix.Point",
+					"name": "",
+					"type": "tuple"
+				}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [
+				{
+					"internalType": "uint256",
+					"name": "tokenId",
+					"type": "uint256"
+				}
+			],
+			"name": "user_point_epoch",
+			"outputs": [
+				{
+					"internalType": "uint256",
+					"name": "",
+					"type": "uint256"
+				}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [
+				{
+					"internalType": "uint256",
+					"name": "tokenId",
+					"type": "uint256"
+				},
+				{
+					"internalType": "uint256",
+					"name": "loc",
+					"type": "uint256"
+				}
+			],
+			"name": "user_point_history",
+			"outputs": [
+				{
+					"components": [
+						{
+							"internalType": "int128",
+							"name": "bias",
+							"type": "int128"
+						},
+						{
+							"internalType": "int128",
+							"name": "slope",
+							"type": "int128"
+						},
+						{
+							"internalType": "uint256",
+							"name": "ts",
+							"type": "uint256"
+						},
+						{
+							"internalType": "uint256",
+							"name": "blk",
+							"type": "uint256"
+						}
+					],
+					"internalType": "struct IVeSix.Point",
+					"name": "",
+					"type": "tuple"
+				}
+			],
+			"stateMutability": "view",
+			"type": "function"
+		}
+	]
+}
