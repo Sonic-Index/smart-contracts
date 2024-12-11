@@ -50,7 +50,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     }
 
     // Constants
-    uint32 private constant MAXTIME = 4 * 365 * 86400;
+    uint32 private constant MAXTIME = 180 days;
     uint32 private constant WEEK = 7 * 86400;
     uint128 private constant MAX_MULTIPLIER = 4e18;
     uint128 private constant BASE_MULTIPLIER = 1e18;
