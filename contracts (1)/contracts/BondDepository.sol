@@ -150,7 +150,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     marketsToAuctioneers[marketId] = msg.sender;
     
     ++marketCounter;
-    emit newBondCreated(marketId, payoutToken_, address(_quoteToken), _terms[1]);
+    emit newBondCreated(marketId, payoutToken_, address(_quoteToken), _terms[0]);
     
     return marketId;
 }
