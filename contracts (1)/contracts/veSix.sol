@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+//@author 0xPhant0m based on Andre Cronje's voteEscrow contract for Solidly
+
 pragma solidity 0.8.27;
 
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -29,6 +31,10 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     error MaxRewardRateExceeded();
     error TokenNotExists();
     error LockNotExists();
+    error MultiplierTooHigh();
+    error InvalidMultiplier();
+
+
 
     struct Point {
         int128 bias;      // Current farming power
@@ -44,12 +50,13 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
 
     struct LockPosition {
         uint128 amount;
+        uint128 slope;    
         uint32 endTime;
         uint32 lastUpdate;
-        uint128 slope;
     }
 
     // Constants
+
     uint32 private constant MAXTIME = 180 days;
     uint32 private constant WEEK = 7 * 86400;
     uint128 private constant MAX_MULTIPLIER = 4e18;
@@ -360,61 +367,15 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         return uint128(uint256(uint128(lastPoint.bias)));
     }
 
-function createLock(
-        uint128 amount,
-        uint32 lockDuration,
-        uint256 deadline,
-        uint128 minMultiplier
-    ) external nonReentrant whenNotPaused validDeadline(deadline) returns (uint256 tokenId) {
-        if (amount == 0) revert InvalidAmount();
-        if (lockDuration == 0 || lockDuration > MAXTIME) revert InvalidDuration();
-        if (_userLockCount[msg.sender] >= MAX_LOCKS_PER_USER) revert ExceedsMaxLocks();
-        
-        uint32 unlockTime = uint32(block.timestamp) + lockDuration;
-        
-        // Calculate slope with safe math
-        uint256 slopeCalc = (uint256(amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
-        if (slopeCalc > type(uint128).max) revert InvalidAmount();
-        uint128 slope = uint128(slopeCalc);
-        
-        // Verify minimum multiplier
-        uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * lockDuration));
-        if (multiplier < minMultiplier) revert SlippageExceeded();
-
-        // Create new lock balance
-        LockedBalance memory newLock = LockedBalance({
-            amount: int128(uint128(amount)),
-            end: unlockTime
-        });
-        
-        // Checkpoint before modifying state
-        _checkpoint(0, LockedBalance(0, 0), newLock);
-
-        // Transfer tokens using SafeERC20
-        uint256 balanceBefore = i_lockedToken.balanceOf(address(this));
-        i_lockedToken.safeTransferFrom(msg.sender, address(this), amount);
-        if (i_lockedToken.balanceOf(address(this)) != balanceBefore + amount) 
-            revert TransferFailed();
-
-        unchecked {
-            tokenId = _nextTokenId++;
-            _userLockCount[msg.sender]++;
-        }
-        _safeMint(msg.sender, tokenId);
-
-        _locks[tokenId] = LockPosition({
-            amount: amount,
-            endTime: unlockTime,
-            lastUpdate: uint32(block.timestamp),
-            slope: slope
-        });
-
-        uint256 weightedSupplyIncrease = (uint256(amount) * multiplier) / PRECISION;
-        if (weightedSupplyIncrease > type(uint128).max) revert InvalidAmount();
-        _totalWeightedSupply += uint128(weightedSupplyIncrease);
-
-        emit Deposit(msg.sender, tokenId, amount, unlockTime);
-    }
+    function _calculateMultiplier(uint128 slope, uint32 duration) internal pure returns (uint128) {
+         uint256 multiplierIncrease = uint256(slope) * duration;
+         uint256 totalMultiplier = BASE_MULTIPLIER + multiplierIncrease;
+    
+        if (totalMultiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
+        if (totalMultiplier < BASE_MULTIPLIER) revert InvalidMultiplier();
+    
+    return uint128(totalMultiplier);
+}
 
     function merge(
         uint256[] calldata tokenIds,
@@ -535,4 +496,6 @@ function createLock(
         return _totalWeightedSupply;
     }
 }
+    
+
     
