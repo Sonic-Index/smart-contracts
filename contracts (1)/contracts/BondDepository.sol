@@ -24,8 +24,14 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     event newBondCreated(uint256 indexed id, address indexed payoutToken, address indexed quoteToken, uint256 initialPrice );
     event BondEnded(uint256 indexed id);
     event addedAuctioneer(address _auctioneer, address payoutToken);
+    event removeAuctioneer(address auctioneer);
+    event MarketTransferred( uint256 marketId, address owner, address newAuctioneer);
     event BondDeposited( address indexed user,  uint256 indexed marketId,  uint256 depositAmount, uint256 totalOwed, uint256 bondPrice );
     event QuoteTokensWithdrawn( uint256 indexed marketId, address indexed auctioneer, uint256 amount, uint256 daoFee );
+    event FeeUpdated (uint256 oldFee, uint256 basePoints);
+    event TokenUnwhitelisted( address _token);
+    event TokenWhitelisted( address _token);
+ 
 
 
     uint256 public marketCounter;
@@ -40,6 +46,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     mapping( address => Bond[]) public bondInfo; 
     address public immutable mSig;
     uint256 public feeToDao;
+    uint256 public constant MAX_FEE = 1000; 
 
 
  // Info for creating new bonds
@@ -89,49 +96,65 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
                                          /*================================= Auctioneer FUNCTIONS =================================*/
 
     function newBond( 
-        address payoutToken_, 
-       IERC20 _quoteToken,
-       uint256 [4] memory _terms,
-       uint32 [2] memory _vestingTerms
- ) external  onlyRole(AUCTIONEER_ROLE) 
-        whenNotPaused  returns (uint256 marketID) {
-         
-          if (!_whitelistedToken[payoutToken_]) revert ("invalid address"); 
-          require (address(_quoteToken)!= payoutToken_);
-
-        IERC20(payoutToken_).safeTransferFrom(msg.sender, address(this), _terms[1]);
-
-        uint256 targetDebt = _terms[3];
-
-        uint256 secondsToConclusion = _vestingTerms[1] - block.timestamp;
-
-        uint256 _maxPayout = uint256(targetDebt * 1800 / secondsToConclusion);
-
-        terms.push(Terms({
-            quoteToken: address(_quoteToken),
-            payoutToken: payoutToken_,
-            amountToBond: _terms[0],
-            controlVariable: _terms[1],
-            minimumPrice: _terms[2],
-            maxDebt: _terms[3],
-            maxPayout: _maxPayout,
-            quoteTokensRaised : 0,
-            bondEnds: _vestingTerms[0],
-            vestingTerm: _vestingTerms[1],
-            totalDebt: 0
-                         }));
-
-        uint256 initialPrice = _terms[1] / (10 ** uint8(IERC20Metadata(address(payoutToken_)).decimals()));
-        uint256  marketId = marketCounter;
-        marketsForPayout[address(payoutToken_)].push(marketId);
-        marketsForQuote[address(_quoteToken)].push(marketId);
-        marketsToAuctioneers[marketId] = (address(msg.sender)); 
-        marketID = marketId;
-        ++marketCounter;
-
-        emit newBondCreated(marketID, payoutToken_, address(_quoteToken), initialPrice);
-    }
-
+    address payoutToken_, 
+    IERC20 _quoteToken,
+    uint256 [4] memory _terms,  // [amountToBond, controlVariable, minimumPrice, maxDebt]
+    uint32 [2] memory _vestingTerms  // [bondEnds, vestingTerm]
+) external onlyRole(AUCTIONEER_ROLE) whenNotPaused returns (uint256 marketID) {
+    // Address validations
+    require(payoutToken_ != address(0), "Invalid payout token");
+    require(address(_quoteToken) != address(0), "Invalid quote token");
+    require(address(_quoteToken) != payoutToken_, "Tokens must be different");
+    require(_whitelistedToken[payoutToken_], "Token not whitelisted");
+    require(!auctioneerHasMarketForQuote(msg.sender, address(_quoteToken)), "Already has market for quote token");
+    
+    // Time validations
+    require(_vestingTerms[0] > block.timestamp, "Bond end too early");
+    require(_vestingTerms[1] > _vestingTerms[0], "Vesting ends before bond");
+    
+    // Parameter validations
+    require(_terms[0] > 0, "Amount must be > 0");
+    require(_terms[1] > 0, "Control variable must be > 0");
+    require(_terms[2] > 0, "Minimum price must be > 0");
+    require(_terms[3] > 0, "Max debt must be > 0");
+    
+    uint256 secondsToConclusion = _vestingTerms[0] - block.timestamp;
+    require(secondsToConclusion > 0, "Invalid vesting period");
+    
+    // Calculate max payout with better precision
+    uint256 _maxPayout = (_terms[3] * 1800) / 10000;  // 18% of max debt
+    _maxPayout = (_maxPayout * 1e18) / secondsToConclusion;  // Scale by time
+    
+    // Transfer payout tokens (use amountToBond, not controlVariable)
+    IERC20(payoutToken_).safeTransferFrom(msg.sender, address(this), _terms[0]);
+    
+    // Create market
+    terms.push(Terms({
+        quoteToken: address(_quoteToken),
+        payoutToken: payoutToken_,
+        amountToBond: _terms[0],
+        controlVariable: _terms[1],
+        minimumPrice: _terms[2],
+        maxDebt: _terms[3],
+        maxPayout: _maxPayout,
+        quoteTokensRaised: 0,
+        bondEnds: _vestingTerms[0],
+        vestingTerm: _vestingTerms[1],
+        totalDebt: 0
+    }));
+    
+    // Market tracking
+    uint256 marketId = marketCounter;
+    marketsForPayout[payoutToken_].push(marketId);
+    marketsForQuote[address(_quoteToken)].push(marketId);
+    marketsToAuctioneers[marketId] = msg.sender;
+    
+    ++marketCounter;
+    emit newBondCreated(marketId, payoutToken_, address(_quoteToken), _terms[1]);
+    
+    return marketId;
+}
+  
     function closeBond(uint256 _id) external   onlyRole(AUCTIONEER_ROLE) 
         whenNotPaused  {
         if (marketsToAuctioneers[_id] != msg.sender) revert ("Not your Bond");
@@ -173,108 +196,105 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     emit QuoteTokensWithdrawn(_id, msg.sender, balance, daoFee);
 }
     
-
-                             /*================================= User FUNCTIONS =================================*/
-function deposit(uint256 _id, uint256 amount, address user) public nonReentrant {
-    // Early validation checks
-    require(user != address(0), "Invalid user address");
-    require(_id < terms.length, "Invalid market ID");
- 
-    // Retrieve the specific bond terms
-    Terms storage term = terms[_id];
-
-    // Comprehensive bond availability checks
-    require(block.timestamp <= term.bondEnds, "Bond has ended");
-    require(term.totalDebt < term.maxDebt, "Maximum bond capacity reached");
-
-    // Decimal-aware minimum deposit calculation
-    uint8 quoteDecimals = IERC20Metadata(address(term.quoteToken)).decimals();
-    uint256 minimumDeposit = calculateMinimumDeposit(quoteDecimals);
-
-    // Deposit amount validations
-    require(amount >= minimumDeposit, "Deposit below minimum threshold");
-    require(amount <= term.maxPayout, "Deposit exceeds maximum allowed");
-
-    // Reentrancy protection pattern
-    // Decay debt before any state changes
-    _tune(_id);
-    _decayDebt(_id);
-
-    // Transfer tokens with safety checks
-    IERC20 quoteToken = IERC20(term.quoteToken);
-    uint256 balanceBefore = quoteToken.balanceOf(address(this));
-    quoteToken.safeTransferFrom(msg.sender, address(this), amount); 
-    uint256 balanceAfter = quoteToken.balanceOf(address(this));
-    require(balanceAfter - balanceBefore == amount, "Incorrect transfer amount");
-    terms[_id].quoteTokensRaised += amount;
-    // Calculate bond price with internal function
-    uint256 price = _marketPrice(_id);
-
-    // Precise total owed calculation
-    uint256 totalOwed = calculateTotalOwed(amount, price);
-    address payoutToken = term.payoutToken;
-
-    // Validate total owed against remaining bond capacity
-    require(term.totalDebt + totalOwed <= term.maxDebt, "Exceeds maximum bond debt");
-
-    // Create bond record with comprehensive details
-    bondInfo[user].push(Bond({
-        tokenBonded: payoutToken,
-        amountOwed: totalOwed, 
-        pricePaid: price,
-        marketId: _id,
-        startTime: uint32(block.timestamp),
-        endTime: uint32(term.vestingTerm + block.timestamp)
-    }));
-
-    // Update total debt
-    term.totalDebt += totalOwed;
-
-    emit BondDeposited(user, _id, amount, totalOwed, price);
+    function transferMarket(uint256 marketId, address newAuctioneer) external {
+    require(marketsToAuctioneers[marketId] == msg.sender, "Not market owner");
+    require(hasRole(AUCTIONEER_ROLE, newAuctioneer), "Not auctioneer");
+    marketsToAuctioneers[marketId] = newAuctioneer;
+    emit MarketTransferred(marketId, msg.sender, newAuctioneer);
 }
 
-function redeem(uint256 _id, address user) external nonReentrant returns (uint256 amountRedeemed) {
+                             /*================================= User FUNCTIONS =================================*/
+    function deposit(uint256 _id, uint256 amount, address user) public nonReentrant {
+        // Early validation checks
+        require(user != address(0), "Invalid user address");
+        require(_id < terms.length, "Invalid market ID");
+    
+        // Retrieve the specific bond terms
+        Terms storage term = terms[_id];
+
+        // Comprehensive bond availability checks
+        require(block.timestamp <= term.bondEnds, "Bond has ended");
+        require(term.totalDebt < term.maxDebt, "Maximum bond capacity reached");
+
+        // Decimal-aware minimum deposit calculation
+        uint8 quoteDecimals = IERC20Metadata(address(term.quoteToken)).decimals();
+        uint256 minimumDeposit = calculateMinimumDeposit(quoteDecimals);
+
+        // Deposit amount validations
+        require(amount >= minimumDeposit, "Deposit below minimum threshold");
+        require(amount <= term.maxPayout, "Deposit exceeds maximum allowed");
+
+        // Reentrancy protection pattern
+        // Decay debt before any state changes
+        _tune(_id);
+        _decayDebt(_id);
+
+        // Transfer tokens with safety checks
+        IERC20 quoteToken = IERC20(term.quoteToken);
+        uint256 balanceBefore = quoteToken.balanceOf(address(this));
+        quoteToken.safeTransferFrom(msg.sender, address(this), amount); 
+        uint256 balanceAfter = quoteToken.balanceOf(address(this));
+        require(balanceAfter - balanceBefore == amount, "Incorrect transfer amount");
+        terms[_id].quoteTokensRaised += amount;
+        // Calculate bond price with internal function
+        uint256 price = _marketPrice(_id);
+
+        // Precise total owed calculation
+        uint256 totalOwed = calculateTotalOwed(amount, price);
+        address payoutToken = term.payoutToken;
+
+        // Validate total owed against remaining bond capacity
+        require(term.totalDebt + totalOwed <= term.maxDebt, "Exceeds maximum bond debt");
+
+        // Create bond record with comprehensive details
+        bondInfo[user].push(Bond({
+            tokenBonded: payoutToken,
+            amountOwed: totalOwed, 
+            pricePaid: price,
+            marketId: _id,
+            startTime: uint32(block.timestamp),
+            endTime: uint32(term.vestingTerm + block.timestamp)
+        }));
+
+        // Update total debt
+        term.totalDebt += totalOwed;
+
+        emit BondDeposited(user, _id, amount, totalOwed, price);
+    }
+
+  function redeem(uint256 _id, address user) external nonReentrant returns (uint256 amountRedeemed) {
     uint256 length = bondInfo[user].length; 
     uint256 totalRedeemed = 0;
 
-    // Use memory array to track and remove fully claimed bonds
-    uint256[] memory bondsToRemove = new uint256[](length);
-    uint256 removedCount = 0;
-
-    for (uint256 i = 0; i < length; ++i) {
-        // Check if this bond matches the specified market ID
-        if (bondInfo[user][i].marketId == _id) {
-            // Calculate linear payout
+    // Iterate backwards to safely remove elements
+    for (uint256 i = length; i > 0;) {
+        i--;  // decrement here to avoid underflow
+        
+        Bond storage currentBond = bondInfo[user][i];
+        if (currentBond.marketId == _id) {
             uint256 amount = calculateLinearPayout(user, i);
-
+            
             if (amount > 0) {
-                // safeTransfer tokens
-                IERC20(terms[_id].payoutToken).safeTransfer(user, amount);
-
-                // Update total redeemed and remaining debt
+                // Update state before transfer
+                currentBond.amountOwed -= amount;
                 totalRedeemed += amount;
-                bondInfo[user][i].amountOwed -= amount;
-
-                // Mark bond for removal if fully redeemed
-                if (bondInfo[user][i].amountOwed == 0) {
-                    bondsToRemove[removedCount] = i;
-                    removedCount++;
+                
+                // Perform transfer
+                IERC20(terms[_id].payoutToken).safeTransfer(user, amount);
+                
+                // If fully redeemed, remove bond
+                if (currentBond.amountOwed == 0) {
+                    // Move the last element to current position and pop
+                    if (i != bondInfo[user].length - 1) {
+                        bondInfo[user][i] = bondInfo[user][bondInfo[user].length - 1];
+                    }
+                    bondInfo[user].pop();
                 }
             }
         }
     }
-
-    // Remove fully redeemed bonds
-    for (uint256 j = 0; j < removedCount; j++) {
-        // Remove the bond by replacing it with the last bond and then reducing array length
-        uint256 indexToRemove = bondsToRemove[j];
-        bondInfo[user][indexToRemove] = bondInfo[user][length - 1];
-        bondInfo[user].pop();
-
-        // Adjust length and indices for subsequent removals
-        length--;
-    }
-     return totalRedeemed;
+    
+    return totalRedeemed;
 }
 
 
@@ -321,6 +341,13 @@ function redeem(uint256 _id, address user) external nonReentrant returns (uint25
         }
     }
 
+    function unwhitelistToken(address _token) external onlyRole(TOKEN_WHITELISTER_ROLE) {
+    require(_whitelistedToken[_token], "Token not whitelisted");
+    _whitelistedToken[_token] = false;
+    emit TokenUnwhitelisted(_token);
+}
+    
+
      function pauseContract() 
         external 
         onlyRole(EMERGENCY_ADMIN_ROLE) 
@@ -337,9 +364,12 @@ function redeem(uint256 _id, address user) external nonReentrant returns (uint25
         emit ContractUnpaused(msg.sender);
     }
 
-    function setFeetoDao(uint32 basePoints) external onlyRole(DEFAULT_ADMIN_ROLE) {
-          feeToDao = basePoints;
-    }
+   function setFeetoDao(uint32 basePoints) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    require(basePoints <= MAX_FEE, "Fee too high");
+    uint256 oldFee = feeToDao;
+    feeToDao = basePoints;
+    emit FeeUpdated(oldFee, basePoints);
+}
 
                             /*================================= View Functions =================================*/
 
@@ -501,29 +531,31 @@ function redeem(uint256 _id, address user) external nonReentrant returns (uint25
             price = _marketPrice(_id);
         }
 
-         function _debtRatio(uint256 _id) internal view returns (uint256) {
+     function _debtRatio(uint256 _id) internal view returns (uint256) {
+  
     Terms memory term = terms[_id];
     
     // Get decimals for precise calculation
     uint8 quoteDecimals = uint8(IERC20Metadata(address(term.quoteToken)).decimals());
     uint8 payoutDecimals = uint8(IERC20Metadata(address(term.payoutToken)).decimals());
 
-    // Normalize total debt to 18 decimals
-    uint256 totalDebt = term.totalDebt * (10**(18 - quoteDecimals));
+    // Normalize totalDebt to 18 decimals (totalDebt is in payoutToken)
+    uint256 totalDebt = term.totalDebt * (10**(18 - payoutDecimals));
     
-    // Get total payout token balance and normalize to 18 decimals
-    uint256 payoutBalance = term.quoteTokensRaised * (10 ** (18 - payoutDecimals));
+    // Normalize quote tokens raised to 18 decimals
+    uint256 quoteBalance = term.quoteTokensRaised * (10 ** (18 - quoteDecimals));
     
     // Prevent division by zero
-    if (payoutBalance == 0) {
+    if (quoteBalance == 0) {
         return type(uint256).max; // Maximum possible debt ratio
     }
 
     // Calculate debt ratio with high precision
-    uint256 debtRatio = (totalDebt * 1e18) / payoutBalance;
+    // Result is scaled to 1e18
+    uint256 debtRatio = (totalDebt * 1e18) / quoteBalance;
     
     return debtRatio;
-} 
+}
 
          function _currentControlVariable(uint256 _id) internal view returns (uint256) {
     Terms memory term = terms[_id];
@@ -589,6 +621,15 @@ function redeem(uint256 _id, address user) external nonReentrant returns (uint25
          return (amount * price) / 1e18;
 }
 
+    function auctioneerHasMarketForQuote(address auctioneer, address quoteToken) public view returns (bool) {
+    uint256[] memory markets = marketsForQuote[quoteToken];
+    for(uint256 i = 0; i < markets.length; i++) {
+        if(marketsToAuctioneers[markets[i]] == auctioneer) {
+            return true;
+        }
+    }
+    return false;
+}
 
           modifier whenNotPaused() {
         require(!paused, "Contract is paused");
@@ -596,3 +637,4 @@ function redeem(uint256 _id, address user) external nonReentrant returns (uint25
     }
  
 }
+
