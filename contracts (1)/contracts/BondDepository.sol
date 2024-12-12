@@ -60,7 +60,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         uint256 maxDebt; // 9 decimal debt ratio, max % total supply created as debt
         uint256 maxPayout; // in thousandths of a %. i.e. 500 = 0.5%
         uint256 quoteTokensRaised; 
-        uint256 lastDecay; 
+        uint256 lastDecay; //block.timestamp of last decay (i.e last deposit)
         uint32 bondEnds; //Unix Timestamp of when the offer ends.
         uint32 vestingTerm; // How long each bond should vest for in seconds
     }
