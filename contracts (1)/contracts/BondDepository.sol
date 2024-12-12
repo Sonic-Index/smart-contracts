@@ -60,6 +60,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         uint256 maxDebt; // 9 decimal debt ratio, max % total supply created as debt
         uint256 maxPayout; // in thousandths of a %. i.e. 500 = 0.5%
         uint256 quoteTokensRaised; 
+        uint256 lastDecay; 
         uint32 bondEnds; //Unix Timestamp of when the offer ends.
         uint32 vestingTerm; // How long each bond should vest for in seconds
     }
@@ -138,6 +139,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         maxDebt: _terms[3],
         maxPayout: _maxPayout,
         quoteTokensRaised: 0,
+        lastDecay: block.timestamp,
         bondEnds: _vestingTerms[0],
         vestingTerm: _vestingTerms[1],
         totalDebt: 0
@@ -150,7 +152,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     marketsToAuctioneers[marketId] = msg.sender;
     
     ++marketCounter;
-    emit newBondCreated(marketId, payoutToken_, address(_quoteToken), _terms[0]);
+    emit newBondCreated(marketId, payoutToken_, address(_quoteToken), _terms[1]);
     
     return marketId;
 }
@@ -446,32 +448,27 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
                              /*================================= Internal Functions =================================*/
 
 
-      function _decayDebt(uint256 _id) internal {
+    function _decayDebt(uint256 _id) internal {
     Terms storage term = terms[_id];
 
-    // Check if the bond is still active or recently ended
-    if (block.timestamp <= term.bondEnds + term.vestingTerm) {
-        uint256 timeSinceBondStart = block.timestamp - term.bondEnds;
-        uint256 vestingTerm = term.vestingTerm;
+    // Get current debt and control variable
+    uint256 currentDebt = term.totalDebt;
+    if (currentDebt == 0) return;
 
-        // Ensure we're within the vesting period
-        if (timeSinceBondStart > 0 && timeSinceBondStart <= vestingTerm) {
-            
-            // Calculate the percentage of vesting term completed
-            uint256 decayPercentage = (timeSinceBondStart * 1e18) / vestingTerm;
+    // Get seconds since market was created (block.timestamp - (bondEnds - length))
+    uint256 secondsSinceLastDecay = block.timestamp - term.lastDecay;
+    
+    // Return if market not active
+    if (secondsSinceLastDecay == 0) return;
 
-            // Calculate decay amount with high precision
-            uint256 decayAmount = (term.totalDebt * decayPercentage) / 1e18;
-
-            // Ensure we don't underflow or decay below zero
-            if (decayAmount > term.totalDebt) {
-                term.totalDebt = 0;
-            } else {
-                term.totalDebt -= decayAmount;
-            }
-        }
-    }
+    // Calculate decay rate based on target vesting time
+    uint256 decay = currentDebt * secondsSinceLastDecay / term.vestingTerm;
+    
+    // Update stored debt
+    term.totalDebt = currentDebt - decay;
+    term.lastDecay = uint32(block.timestamp);
 }
+
 
         function _tune(uint256 _id) internal{
             if (block.timestamp > adjustments[_id].lastBlock + adjustments[_id].buffer) {
@@ -637,4 +634,3 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     }
  
 }
-
