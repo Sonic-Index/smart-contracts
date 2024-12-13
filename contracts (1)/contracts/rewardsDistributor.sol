@@ -78,7 +78,7 @@ contract SixRewardsDistributor is Ownable, ReentrancyGuard {
         _updateVeSupply();
     }
 
-    function _updateVeSupply() internal {
+     function _updateVeSupply() internal {
         uint256 currentTime = (block.timestamp / WEEK) * WEEK;
         uint256 t = timeCursor;
         
@@ -93,15 +93,14 @@ contract SixRewardsDistributor is Ownable, ReentrancyGuard {
                 dt = int128(int256(t - point.ts));
             }
             
-            uint256 supply = uint256(int256(point.bias - point.slope * dt));
-            if (supply < 0) supply = 0;
+            int256 bias_slope_product = point.bias - point.slope * dt;
+            veSupplyCache[t] = bias_slope_product > 0 ? uint256(bias_slope_product) : 0;
             
-            veSupplyCache[t] = supply;
             t += WEEK;
-        }
-        
-        timeCursor = t;
     }
+    
+    timeCursor = t;
+}
 
     function _findEpochForTimestamp(uint256 timestamp) internal view returns (uint256) {
         uint256 min = 0;
