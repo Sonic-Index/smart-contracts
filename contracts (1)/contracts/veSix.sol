@@ -336,6 +336,56 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         emit Withdraw(msg.sender, tokenId, amount);
     }
 
+    function createLock(
+        uint128 amount,
+        uint32 lockDuration,
+        uint256 deadline,
+        uint128 minMultiplier
+    ) external nonReentrant whenNotPaused validDeadline(deadline) returns (uint256 tokenId) {
+        if (amount == 0) revert InvalidAmount();
+        if (lockDuration == 0 || lockDuration > MAXTIME) revert InvalidDuration();
+        if (_userLockCount[msg.sender] >= MAX_LOCKS_PER_USER) revert ExceedsMaxLocks();
+        
+        uint32 unlockTime = uint32(block.timestamp) + lockDuration;
+        
+        // Calculate slope with safe math
+        uint256 slopeCalc = (uint256(amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
+        if (slopeCalc > type(uint128).max) revert InvalidAmount();
+        uint128 slope = uint128(slopeCalc);
+        
+        // Verify minimum multiplier
+        uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * lockDuration));
+        if (multiplier < minMultiplier) revert SlippageExceeded();
+        // Create new lock balance
+        LockedBalance memory newLock = LockedBalance({
+            amount: int128(uint128(amount)),
+            end: unlockTime
+        });
+        
+        // Checkpoint before modifying state
+        _checkpoint(0, LockedBalance(0, 0), newLock);
+        // Transfer tokens using SafeERC20
+        uint256 balanceBefore = i_lockedToken.balanceOf(address(this));
+        i_lockedToken.safeTransferFrom(msg.sender, address(this), amount);
+        if (i_lockedToken.balanceOf(address(this)) != balanceBefore + amount) 
+            revert TransferFailed();
+        unchecked {
+            tokenId = _nextTokenId++;
+            _userLockCount[msg.sender]++;
+        }
+        _safeMint(msg.sender, tokenId);
+        _locks[tokenId] = LockPosition({
+            amount: amount,
+            endTime: unlockTime,
+            lastUpdate: uint32(block.timestamp),
+            slope: slope
+        });
+        uint256 weightedSupplyIncrease = (uint256(amount) * multiplier) / PRECISION;
+        if (weightedSupplyIncrease > type(uint128).max) revert InvalidAmount();
+        _totalWeightedSupply += uint128(weightedSupplyIncrease);
+        emit Deposit(msg.sender, tokenId, amount, unlockTime);
+    }
+
     function getTotalFarmingPower(uint32 timestamp) public view returns (uint128) {
         Point memory lastPoint = pointHistory[epoch];
         return uint128(_supplyAt(lastPoint, timestamp));
