@@ -84,6 +84,18 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         uint lastBlock; // block when last adjustment made
       }
 
+        //Strictly for front-end optimization
+     struct BondMarketInfo {
+        address quoteToken;
+        address payoutToken;
+        uint256 price;
+        uint256 maxPayout;
+        uint256 vestingTerm;
+        uint256 amountToBond;
+        address auctioneer;
+        bool isLive;
+        uint256 totalDebt;
+}
 
     constructor(address _mSig){
       if (_mSig == address (0)) revert ("Invalid address");
@@ -435,6 +447,33 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     }
 
     return currentClaimable;
+}
+
+
+    function getBondMarketInfo(uint256 marketId) public view returns (BondMarketInfo memory) {
+        Terms storage term = terms[marketId];
+        
+        return BondMarketInfo({
+            quoteToken: term.quoteToken,
+            payoutToken: term.payoutToken,
+            price: _trueBondPrice(marketId),
+            maxPayout: term.maxPayout,
+            vestingTerm: term.vestingTerm, 
+            amountToBond: term.amountToBond,
+            auctioneer: marketsToAuctioneers[marketId],
+            isLive: isLive(marketId),
+            totalDebt: term.totalDebt
+        });
+    }
+
+    function getBondMarketInfoBatch(uint256[] calldata marketIds) external view returns (BondMarketInfo[] memory) {
+    BondMarketInfo[] memory markets = new BondMarketInfo[](marketIds.length);
+    
+    for (uint256 i = 0; i < marketIds.length; i++) {
+        markets[i] = getBondMarketInfo(marketIds[i]);
+    }
+    
+    return markets;
 }
 
   function payoutFor(address user, uint256 _bondId) public view returns (uint256 amount) {
