@@ -26,7 +26,6 @@ contract VeArtProxy is Ownable {
     // State variables
     IVeSix public immutable veSix;
 
-    // Lock data struct to avoid stack too deep
     struct LockData {
         uint256 tokenId;
         uint128 amount;
@@ -70,7 +69,7 @@ contract VeArtProxy is Ownable {
     function _generateMetadata(LockData memory data, string memory image) internal pure returns (string memory) {
         return string(
             abi.encodePacked(
-                '{"name": "veSix #',
+                '{"name": "veSIX #',
                 data.tokenId.toString(),
                 '", "description": "Voting Escrow Position NFT", "image": "data:image/svg+xml;base64,',
                 image,
@@ -85,12 +84,13 @@ contract VeArtProxy is Ownable {
         );
     }
     
-    function generateSVG(LockData memory data) internal view returns (string memory) {
+    function generateSVG(LockData memory data) internal pure returns (string memory) {
         string memory svg = string(
             abi.encodePacked(
-                '<svg width="387" height="476" viewBox="0 0 387 476" fill="none" xmlns="http://www.w3.org/2000/svg">',
+                '<svg width="400" height="500" viewBox="0 0 400 500" fill="none" xmlns="http://www.w3.org/2000/svg">',
                 _generateDefs(),
                 _generateBackground(),
+                _generateSonicWaves(),
                 _generateContent(data),
                 '</svg>'
             )
@@ -102,13 +102,11 @@ contract VeArtProxy is Ownable {
         return string(
             abi.encodePacked(
                 '<defs>',
-                '<linearGradient id="paint0_linear_272_615" x1="193.5" y1="0" x2="193.5" y2="263" gradientUnits="userSpaceOnUse">',
-                '<stop offset="0" stop-color="#4338CA"/>',
-                '<stop offset="1" stop-color="#6366F1"/>',
+                '<linearGradient id="bgGradient" x1="200" y1="0" x2="200" y2="500" gradientUnits="userSpaceOnUse">',
+                '<stop offset="0%" stop-color="#1a237e"/>',
+                '<stop offset="100%" stop-color="#000033"/>',
                 '</linearGradient>',
-                '<clipPath id="clip0_272_615">',
-                '<rect width="387" height="476" rx="16" fill="white"/>',
-                '</clipPath>',
+                '<filter id="blur"><feGaussianBlur in="SourceGraphic" stdDeviation="5"/></filter>',
                 '</defs>'
             )
         );
@@ -117,70 +115,90 @@ contract VeArtProxy is Ownable {
     function _generateBackground() internal pure returns (string memory) {
         return string(
             abi.encodePacked(
-                '<g clip-path="url(#clip0_272_615)">',
-                '<path d="M0 16C0 7.2 7.2 0 16 0H371C379.8 0 387 7.2 387 16V263H0V16Z" fill="url(#paint0_linear_272_615)"/>',
-                '<path fill-rule="evenodd" clip-rule="evenodd" d="M0 263H387V460C387 468.8 379.8 476 371 476H16C7.2 476 0 468.8 0 460V263Z" fill="#01073A"/>',
-                _generateDecorativePath(),
+                '<rect width="400" height="500" rx="16" fill="url(#bgGradient)"/>'
+            )
+        );
+    }
+
+    function _generateSonicWaves() internal pure returns (string memory) {
+        return string(
+            abi.encodePacked(
+                '<g opacity="0.1" filter="url(#blur)">',
+                '<path d="M50,250 Q200,150 350,250" stroke="white" stroke-width="2" fill="none"/>',
+                '<path d="M50,270 Q200,170 350,270" stroke="white" stroke-width="2" fill="none"/>',
+                '<path d="M50,290 Q200,190 350,290" stroke="white" stroke-width="2" fill="none"/>',
                 '</g>'
             )
         );
     }
 
-    function _generateDecorativePath() internal pure returns (string memory) {
-        return '<path d="M93.1002 53.6C95.8002 49.3 97.8002 45.4 100.5 42C107.3 33.1 115.7 33.1 122.5 42C130 51.7 133.1 63.3 135.8 75C136.3 77.1 136.7 79.3 137.4 82.3C139.6 78.6 141.1 75.6 143.1 72.9C147.4 67.2 153.2 66.7 156.7 72.8C160.6 79.6 162.7 87.5 165.5 95C165.7 95.6 165.8 96.2 166.1 97.8C167.2 96 167.9 94.9 168.7 93.8C172.2 88.6 176.8 88.4 179.1 94.1C181.8 100.9 183.6 108.1 184.6 115.3C186.2 126.6 185.1 137.9 181.5 148.8C181.1 150 180.9 151.5 180.1 152.4C178.3 154.4 176.3 157.3 174.2 157.5C172.3 157.6 170.1 154.6 168.1 152.8C167.5 152.3 167.3 151.4 166.4 150C165 154.8 164.2 159.1 162.6 163C160.8 167.3 158.8 171.8 156 175.5C152.4 180.2 147.8 180 143.9 175.4C141.6 172.7 140 169.4 137.8 166C136.1 172.6 135.1 179.1 132.8 185.1C129.9 192.7 126.8 200.5 122.3 207.1C115.9 216.6 107.1 216.2 100.2 207C97.6001 203.5 95.6002 199.5 93.1002 195.5C90.8002 201.4 89.1002 207.3 86.3002 212.6C82.7002 219.5 78.8002 226.5 73.9002 232.5C62.6002 246.1 47.6002 245.8 36.0002 232.5C26.6002 221.8 21.1002 209 17.4002 195.5C3.70015 145.3 3.90015 95.2 19.7002 45.5C23.1002 34.7 28.2002 24.5 35.8002 15.9C47.7002 2.40002 62.4001 2.40002 74.2001 15.9C81.8001 24.6 86.5002 34.8 90.4002 45.5C91.4002 48 92.1002 50.5 93.1002 53.6Z" stroke="#BCC1F1" stroke-opacity="0.08" stroke-width="11"/>';
-    }
-
-    function _generateContent(LockData memory data) internal view returns (string memory) {
-        return string(
-            abi.encodePacked(
-                _generateInfoBoxes(data),
-                _generateLockPowerVisualization(data)
-            )
-        );
-    }
-
-    function _generateInfoBoxes(LockData memory data) internal view returns (string memory) {
-        string memory tokenIdText = string(
-            abi.encodePacked(
-                '<rect x="24" y="287" width="174" height="30" rx="4" fill="#BDC2F3"/>',
-                '<text x="40" y="305" fill="#01073A" font-family="monospace" font-size="14">Token ID: #',
-                data.tokenId.toString(),
-                '</text>'
-            )
-        );
-
-        string memory amountText = string(
-            abi.encodePacked(
-                '<rect x="210" y="287" width="174" height="30" rx="4" fill="#BDC2F3"/>',
-                '<text x="226" y="305" fill="#01073A" font-family="monospace" font-size="14">Amount: ',
-                uint256(data.amount / 1e18).toString(),
-                ' SIX</text>'
-            )
-        );
-
-        uint256 remainingDays = (uint256(data.endTime) - block.timestamp) / 1 days;
-        string memory timeText = string(
-            abi.encodePacked(
-                '<text x="40" y="385" fill="#BDC2F3" font-family="monospace" font-size="14">Time Remaining: ',
-                remainingDays.toString(),
-                ' days</text>'
-            )
-        );
-
-        return string(abi.encodePacked(tokenIdText, amountText, timeText));
-    }
-
-    function _generateLockPowerVisualization(LockData memory data) internal pure returns (string memory) {
-        uint256 visualHeight = (uint256(data.multiplier) * 200) / 1e18;
+    function _generateContent(LockData memory data) internal pure returns (string memory) {
+        string memory dateString = _formatDate(data.endTime);
         
         return string(
             abi.encodePacked(
-                '<g opacity="0.6">',
-                '<ellipse cx="67.2" cy="119.5" rx="12.2" ry="',
-                visualHeight.toString(),
-                '" fill="#BDC2F3"/>',
-                '</g>'
+                '<text x="50" y="80" fill="white" font-family="Arial" font-size="24" font-weight="bold">Sonic Index</text>',
+                '<rect x="50" y="120" width="120" height="30" rx="4" fill="white" fill-opacity="0.1"/>',
+                '<text x="60" y="140" fill="white" font-family="Arial" font-size="14">veSIX #',
+                data.tokenId.toString(),
+                '</text>',
+                _generateLockInfo(data),
+                _generateExpiryInfo(dateString)
             )
         );
+    }
+
+    function _generateLockInfo(LockData memory data) internal pure returns (string memory) {
+        return string(
+            abi.encodePacked(
+                '<text x="50" y="200" fill="white" font-family="Arial" font-size="16">Amount Locked</text>',
+                '<text x="50" y="230" fill="white" font-family="Arial" font-size="24">',
+                uint256(data.amount / 1e18).toString(),
+                '</text>',
+                '<text x="250" y="200" fill="white" font-family="Arial" font-size="16">veSIX Power</text>',
+                '<text x="250" y="230" fill="white" font-family="Arial" font-size="24">',
+                uint256((data.multiplier * 100) / 1e20).toString(), // Divide by 1e20 to get 2 decimal places
+                '</text>'
+            )
+        );
+    }
+
+    function _generateExpiryInfo(string memory dateString) internal pure returns (string memory) {
+        return string(
+            abi.encodePacked(
+                '<text x="50" y="300" fill="white" font-family="Arial" font-size="16">Expires</text>',
+                '<text x="50" y="330" fill="white" font-family="Arial" font-size="24">',
+                dateString,
+                '</text>'
+            )
+        );
+    }
+
+    function _formatDate(uint32 timestamp) internal pure returns (string memory) {
+        uint256 day = (timestamp / 86400) % 31 + 1;
+        uint256 month = (timestamp / 2629743) % 12 + 1;
+        uint256 year = 1970 + (timestamp / 31556926);
+        
+        return string(
+            abi.encodePacked(
+                _padZero(day),
+                '/',
+                _padZero(month),
+                '/',
+                year.toString()
+            )
+        );
+    }
+
+    function _padZero(uint256 num) internal pure returns (string memory) {
+        if (num < 10) {
+            return string(
+                abi.encodePacked(
+                    '0',
+                    num.toString()
+                )
+            );
+        }
+        return num.toString();
     }
 }
