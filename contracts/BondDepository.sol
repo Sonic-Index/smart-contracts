@@ -1,3 +1,4 @@
+
 // SPDX-License-Identifier: MIT
 
 //@author 0xPhant0m based on Ohm Bond Depository and Bond Protocol
@@ -139,22 +140,24 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     _maxPayout = (_maxPayout * 1e18) / secondsToConclusion;  // Scale by time
     
     // Transfer payout tokens (use amountToBond, not controlVariable)
-    IERC20(payoutToken_).safeTransferFrom(msg.sender, address(this), _terms[0]);
+    uint8 payoutDecimals = IERC20Metadata(payoutToken_).decimals();
+
+   IERC20(payoutToken_).safeTransferFrom(msg.sender, address(this), _terms[0] * 10**payoutDecimals); 
     
     // Create market
     terms.push(Terms({
-        quoteToken: address(_quoteToken),
-        payoutToken: payoutToken_,
-        amountToBond: _terms[0],
-        controlVariable: _terms[1],
-        minimumPrice: _terms[2],
-        maxDebt: _terms[3],
-        maxPayout: _maxPayout,
-        quoteTokensRaised: 0,
-        lastDecay: block.timestamp,
-        bondEnds: _vestingTerms[0],
-        vestingTerm: _vestingTerms[1],
-        totalDebt: 0
+       quoteToken: address(_quoteToken),
+       payoutToken: payoutToken_,
+       amountToBond: _terms[0] * 10**payoutDecimals,  
+       controlVariable: _terms[1],
+       minimumPrice: _terms[2],
+       maxDebt: _terms[3] * 10**payoutDecimals,  
+       maxPayout: _maxPayout,
+       quoteTokensRaised: 0,
+       lastDecay: block.timestamp,
+       bondEnds: _vestingTerms[0],
+       vestingTerm: _vestingTerms[1],
+       totalDebt: 0
     }));
     
     // Market tracking
@@ -169,42 +172,35 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     return marketId;
 }
   
-    function closeBond(uint256 _id) external   onlyRole(AUCTIONEER_ROLE) 
-        whenNotPaused  {
-        if (marketsToAuctioneers[_id] != msg.sender) revert ("Not your Bond");
-        terms[_id].bondEnds = uint32(block.timestamp);
+   function closeBond(uint256 _id) external onlyRole(AUCTIONEER_ROLE) whenNotPaused {
+    if (marketsToAuctioneers[_id] != msg.sender) revert ("Not your Bond");
+    terms[_id].bondEnds = uint32(block.timestamp);
 
-        uint256 amountLeft = terms[_id].amountToBond - terms[_id].totalDebt;
+    uint256 amountLeft = terms[_id].amountToBond - terms[_id].totalDebt;
+    uint8 payoutDecimals = IERC20Metadata(terms[_id].payoutToken).decimals();
 
-         IERC20(terms[_id].payoutToken).safeTransfer(msg.sender, amountLeft);
- 
-        emit BondEnded(_id);
-        }
+    IERC20(terms[_id].payoutToken).safeTransfer(msg.sender, amountLeft * 10**payoutDecimals);
 
-        function withdrawQuoteTokens(uint256 _id) external onlyRole(AUCTIONEER_ROLE) whenNotPaused {
-    // Ensure only the original auctioneer for this market can withdraw
+    emit BondEnded(_id);
+}
+
+  function withdrawQuoteTokens(uint256 _id) external onlyRole(AUCTIONEER_ROLE) whenNotPaused {
     require(marketsToAuctioneers[_id] == msg.sender, "Not market's auctioneer");
-
-    // Ensure bond has ended
     require(block.timestamp > terms[_id].bondEnds, "Bond not yet concluded");
 
-    // Get the quote token and its balance
     address quoteToken = terms[_id].quoteToken;
     uint256 balance = terms[_id].quoteTokensRaised;
+    uint8 quoteDecimals = IERC20Metadata(quoteToken).decimals();
 
-    // Calculate DAO fee if applicable
     uint256 daoFee = 0;
     if (feeToDao > 0) {
-        daoFee = (balance * feeToDao) / 10000; // Assuming feeToDao is in basis points
+        daoFee = (balance * feeToDao) / 10000;
         balance -= daoFee;
     }
 
-    // safeTransfer quote tokens to auctioneer
-    IERC20(quoteToken).safeTransfer(msg.sender, balance);
-
-    // safeTransfer DAO fee if applicable
+    IERC20(quoteToken).safeTransfer(msg.sender, balance * 10**quoteDecimals);
     if (daoFee > 0) {
-        IERC20(quoteToken).safeTransfer(mSig, daoFee);
+        IERC20(quoteToken).safeTransfer(mSig, daoFee * 10**quoteDecimals);
     }
 
     emit QuoteTokensWithdrawn(_id, msg.sender, balance, daoFee);
@@ -279,26 +275,23 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
   function redeem(uint256 _id, address user) external nonReentrant returns (uint256 amountRedeemed) {
     uint256 length = bondInfo[user].length; 
     uint256 totalRedeemed = 0;
+    uint8 payoutDecimals = IERC20Metadata(terms[_id].payoutToken).decimals();
 
-    // Iterate backwards to safely remove elements
     for (uint256 i = length; i > 0;) {
-        i--;  // decrement here to avoid underflow
+        i--;  
         
         Bond storage currentBond = bondInfo[user][i];
         if (currentBond.marketId == _id) {
             uint256 amount = calculateLinearPayout(user, i);
             
             if (amount > 0) {
-                // Update state before transfer
                 currentBond.amountOwed -= amount;
                 totalRedeemed += amount;
                 
-                // Perform transfer
-                IERC20(terms[_id].payoutToken).safeTransfer(user, amount);
+                // Scale amount by token decimals for transfer
+                IERC20(terms[_id].payoutToken).safeTransfer(user, amount * 10**payoutDecimals);
                 
-                // If fully redeemed, remove bond
                 if (currentBond.amountOwed == 0) {
-                    // Move the last element to current position and pop
                     if (i != bondInfo[user].length - 1) {
                         bondInfo[user][i] = bondInfo[user][bondInfo[user].length - 1];
                     }
@@ -487,24 +480,19 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
                              /*================================= Internal Functions =================================*/
 
 
-    function _decayDebt(uint256 _id) internal {
+   function _decayDebt(uint256 _id) internal {
     Terms storage term = terms[_id];
-
-    // Get current debt and control variable
+    
     uint256 currentDebt = term.totalDebt;
     if (currentDebt == 0) return;
 
-    // Get seconds since market was created (block.timestamp - (bondEnds - length))
-    uint256 secondsSinceLastDecay = block.timestamp - term.lastDecay;
-    
-    // Return if market not active
-    if (secondsSinceLastDecay == 0) return;
+    uint256 timeSinceLastDecay = block.timestamp - term.lastDecay;
+    if (timeSinceLastDecay == 0) return;
 
-    // Calculate decay rate based on target vesting time
-    uint256 decay = currentDebt * secondsSinceLastDecay / term.vestingTerm;
     
-    // Update stored debt
-    term.totalDebt = currentDebt - decay;
+    uint256 decay = (currentDebt * timeSinceLastDecay) / (term.vestingTerm * 100); 
+    
+    term.totalDebt = decay > currentDebt ? 0 : currentDebt - decay;
     term.lastDecay = uint32(block.timestamp);
 }
 
@@ -654,13 +642,13 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         // Helper function for precise owed calculation
         function calculateTotalOwed(uint256 amount, uint256 price) internal pure returns (uint256) {
 
-         return (amount * price) / 1e18;
+         return amount * price; 
 }
 
     function auctioneerHasMarketForQuote(address auctioneer, address quoteToken) public view returns (bool) {
     uint256[] memory markets = marketsForQuote[quoteToken];
     for(uint256 i = 0; i < markets.length; i++) {
-        if(marketsToAuctioneers[markets[i]] == auctioneer) {
+       if(marketsToAuctioneers[markets[i]] == auctioneer && isLive(markets[i])) {         
             return true;
         }
     }
