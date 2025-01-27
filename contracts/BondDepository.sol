@@ -57,7 +57,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         uint256 amountToBond; //Amount of payout Tokens dedicated to this request
         uint256 totalDebt;
         uint256 controlVariable; // scaling variable for price
-        uint256 minimumPrice; // vs principle value
+        uint256 minimumPrice; // vs principle value add 3 decimals of precision
         uint256 maxDebt; // 9 decimal debt ratio, max % total supply created as debt
         uint256 maxPayout; // in thousandths of a %. i.e. 500 = 0.5%
         uint256 quoteTokensRaised; 
@@ -96,6 +96,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         address auctioneer;
         bool isLive;
         uint256 totalDebt;
+        uint256 bondEnds;
 }
 
     constructor(address _mSig){
@@ -123,9 +124,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     require(!auctioneerHasMarketForQuote(msg.sender, address(_quoteToken)), "Already has market for quote token");
     
     // Time validations
-    require(_vestingTerms[0] > block.timestamp, "Bond end too early");
-    require(_vestingTerms[1] > _vestingTerms[0], "Vesting ends before bond");
-    
+    require(_vestingTerms[0] > block.timestamp, "Bond end too early"); 
     // Parameter validations
     require(_terms[0] > 0, "Amount must be > 0");
     require(_terms[1] > 0, "Control variable must be > 0");
@@ -150,7 +149,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
        payoutToken: payoutToken_,
        amountToBond: _terms[0] * 10**payoutDecimals,  
        controlVariable: _terms[1],
-       minimumPrice: _terms[2],
+       minimumPrice: (_terms[2] * 10 ** 18) / 1000,
        maxDebt: _terms[3] * 10**payoutDecimals,  
        maxPayout: _maxPayout,
        quoteTokensRaised: 0,
@@ -455,7 +454,8 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
             amountToBond: term.amountToBond,
             auctioneer: marketsToAuctioneers[marketId],
             isLive: isLive(marketId),
-            totalDebt: term.totalDebt
+            totalDebt: term.totalDebt,
+            bondEnds: term.bondEnds
         });
     }
 
@@ -570,8 +570,8 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     uint256 quoteBalance = term.quoteTokensRaised * (10 ** (18 - quoteDecimals));
     
     // Prevent division by zero
-    if (quoteBalance == 0) {
-        return type(uint256).max; // Maximum possible debt ratio
+    if (quoteBalance == 0) { 
+        return 1e18; 
     }
 
     // Calculate debt ratio with high precision
