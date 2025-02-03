@@ -59,7 +59,6 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         uint256 controlVariable; // scaling variable for price
         uint256 minimumPrice; // vs principle value add 3 decimals of precision
         uint256 maxDebt; // 9 decimal debt ratio, max % total supply created as debt
-        uint256 maxPayout; // in thousandths of a %. i.e. 500 = 0.5%
         uint256 quoteTokensRaised; 
         uint256 lastDecay; //block.timestamp of last decay (i.e last deposit)
         uint32 bondEnds; //Unix Timestamp of when the offer ends.
@@ -135,11 +134,10 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     require(secondsToConclusion > 0, "Invalid vesting period");
     
     // Calculate max payout with better precision
-    uint256 _maxPayout = (_terms[3] * 1800) / 10000;  // 18% of max debt
-    _maxPayout = (_maxPayout * 1e18) / secondsToConclusion;  // Scale by time
-    
-    // Transfer payout tokens (use amountToBond, not controlVariable)
-    uint8 payoutDecimals = IERC20Metadata(payoutToken_).decimals();
+   uint8 payoutDecimals = IERC20Metadata(payoutToken_).decimals();
+
+
+    // Transfer payout tokens 
 
    IERC20(payoutToken_).safeTransferFrom(msg.sender, address(this), _terms[0] * 10**payoutDecimals); 
     
@@ -151,7 +149,6 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
        controlVariable: _terms[1],
        minimumPrice: (_terms[2] * 10 ** 18) / 1000,
        maxDebt: _terms[3] * 10**payoutDecimals,  
-       maxPayout: _maxPayout,
        quoteTokensRaised: 0,
        lastDecay: block.timestamp,
        bondEnds: _vestingTerms[0],
@@ -176,9 +173,8 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     terms[_id].bondEnds = uint32(block.timestamp);
 
     uint256 amountLeft = terms[_id].amountToBond - terms[_id].totalDebt;
-    uint8 payoutDecimals = IERC20Metadata(terms[_id].payoutToken).decimals();
 
-    IERC20(terms[_id].payoutToken).safeTransfer(msg.sender, amountLeft * 10**payoutDecimals);
+    IERC20(terms[_id].payoutToken).safeTransfer(msg.sender, amountLeft);
 
     emit BondEnded(_id);
 }
@@ -189,7 +185,6 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
 
     address quoteToken = terms[_id].quoteToken;
     uint256 balance = terms[_id].quoteTokensRaised;
-    uint8 quoteDecimals = IERC20Metadata(quoteToken).decimals();
 
     uint256 daoFee = 0;
     if (feeToDao > 0) {
@@ -197,9 +192,9 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
         balance -= daoFee;
     }
 
-    IERC20(quoteToken).safeTransfer(msg.sender, balance * 10**quoteDecimals);
+    IERC20(quoteToken).safeTransfer(msg.sender, balance);
     if (daoFee > 0) {
-        IERC20(quoteToken).safeTransfer(mSig, daoFee * 10**quoteDecimals);
+        IERC20(quoteToken).safeTransfer(mSig, daoFee);
     }
 
     emit QuoteTokensWithdrawn(_id, msg.sender, balance, daoFee);
@@ -213,68 +208,52 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
 }
 
                              /*================================= User FUNCTIONS =================================*/
-    function deposit(uint256 _id, uint256 amount, address user) public nonReentrant {
-        // Early validation checks
-        require(user != address(0), "Invalid user address");
-        require(_id < terms.length, "Invalid market ID");
+ 
+   function deposit(uint256 _id, uint256 amount, address user) public nonReentrant {
+    require(user != address(0), "Invalid user address");
+    require(_id < terms.length, "Invalid market ID");
+    Terms storage term = terms[_id];
+    require(block.timestamp <= term.bondEnds, "Bond has ended");
+    require(term.totalDebt < term.maxDebt, "Maximum bond capacity reached");
+
+    uint8 quoteDecimals = IERC20Metadata(address(term.quoteToken)).decimals();
+    uint256 minimumDeposit = calculateMinimumDeposit(quoteDecimals);
+    require(amount >= minimumDeposit, "Deposit below minimum threshold");
+
+    _tune(_id);
+    _decayDebt(_id);
+
+    uint256 price = _marketPrice(_id);
+    uint256 payout = (amount * 1e18) / price;
+    uint256 maxPayout = ((term.maxDebt - term.totalDebt) * 1800) / 10000;
     
-        // Retrieve the specific bond terms
-        Terms storage term = terms[_id];
+    require(payout <= maxPayout, "Deposit exceeds maximum allowed");
+    require(term.totalDebt + payout <= term.maxDebt, "Exceeds maximum bond debt");
 
-        // Comprehensive bond availability checks
-        require(block.timestamp <= term.bondEnds, "Bond has ended");
-        require(term.totalDebt < term.maxDebt, "Maximum bond capacity reached");
+    IERC20 quoteToken = IERC20(term.quoteToken);
+    uint256 balanceBefore = quoteToken.balanceOf(address(this));
+    quoteToken.safeTransferFrom(msg.sender, address(this), amount);
+    uint256 balanceAfter = quoteToken.balanceOf(address(this));
+    require(balanceAfter - balanceBefore == amount, "Incorrect transfer amount");
+    
+    terms[_id].quoteTokensRaised += amount;
+    terms[_id].totalDebt += payout;
 
-        // Decimal-aware minimum deposit calculation
-        uint8 quoteDecimals = IERC20Metadata(address(term.quoteToken)).decimals();
-        uint256 minimumDeposit = calculateMinimumDeposit(quoteDecimals);
+    bondInfo[user].push(Bond({
+        tokenBonded: term.payoutToken,
+        amountOwed: payout,
+        pricePaid: price,
+        marketId: _id,
+        startTime: uint32(block.timestamp),
+        endTime: uint32(term.vestingTerm + block.timestamp)
+    }));
+        emit BondDeposited(user, _id, amount, payout, price); 
+   }
 
-        // Deposit amount validations
-        require(amount >= minimumDeposit, "Deposit below minimum threshold");
-        require(amount <= term.maxPayout, "Deposit exceeds maximum allowed");
-
-        // Reentrancy protection pattern
-        // Decay debt before any state changes
-        _tune(_id);
-        _decayDebt(_id);
-
-        // Transfer tokens with safety checks
-        IERC20 quoteToken = IERC20(term.quoteToken);
-        uint256 balanceBefore = quoteToken.balanceOf(address(this));
-        quoteToken.safeTransferFrom(msg.sender, address(this), amount); 
-        uint256 balanceAfter = quoteToken.balanceOf(address(this));
-        require(balanceAfter - balanceBefore == amount, "Incorrect transfer amount");
-        terms[_id].quoteTokensRaised += amount;
-        // Calculate bond price with internal function
-        uint256 price = _marketPrice(_id);
-
-        // Precise total owed calculation
-        uint256 totalOwed = calculateTotalOwed(amount, price);
-        address payoutToken = term.payoutToken;
-
-        // Validate total owed against remaining bond capacity
-        require(term.totalDebt + totalOwed <= term.maxDebt, "Exceeds maximum bond debt");
-
-        // Create bond record with comprehensive details
-        bondInfo[user].push(Bond({
-            tokenBonded: payoutToken,
-            amountOwed: totalOwed, 
-            pricePaid: price,
-            marketId: _id,
-            startTime: uint32(block.timestamp),
-            endTime: uint32(term.vestingTerm + block.timestamp)
-        }));
-
-        // Update total debt
-        term.totalDebt += totalOwed;
-
-        emit BondDeposited(user, _id, amount, totalOwed, price);
-    }
 
   function redeem(uint256 _id, address user) external nonReentrant returns (uint256 amountRedeemed) {
     uint256 length = bondInfo[user].length; 
-    uint256 totalRedeemed = 0;
-    uint8 payoutDecimals = IERC20Metadata(terms[_id].payoutToken).decimals();
+    uint256 totalRedeemed = 0; 
 
     for (uint256 i = length; i > 0;) {
         i--;  
@@ -288,7 +267,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
                 totalRedeemed += amount;
                 
                 // Scale amount by token decimals for transfer
-                IERC20(terms[_id].payoutToken).safeTransfer(user, amount * 10**payoutDecimals);
+                IERC20(terms[_id].payoutToken).safeTransfer(user, amount);
                 
                 if (currentBond.amountOwed == 0) {
                     if (i != bondInfo[user].length - 1) {
@@ -399,6 +378,11 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
          return block.timestamp <= terms[id_].bondEnds && terms[id_].totalDebt < terms[id_].maxDebt;
 }
      
+     function currentMaxPayout(uint256 _id) public view returns (uint256) {
+       Terms memory term = terms[_id];
+       uint256 remainingDebt = term.maxDebt - term.totalDebt;
+       return (remainingDebt * 1800) / 10000;  // 18% of remaining
+}
     
     function bondPrice(uint256 id_) public view returns(uint256) {
          return _trueBondPrice(id_);
@@ -449,7 +433,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
             quoteToken: term.quoteToken,
             payoutToken: term.payoutToken,
             price: _trueBondPrice(marketId),
-            maxPayout: term.maxPayout,
+            maxPayout: currentMaxPayout(marketId),
             vestingTerm: term.vestingTerm, 
             amountToBond: term.amountToBond,
             auctioneer: marketsToAuctioneers[marketId],
