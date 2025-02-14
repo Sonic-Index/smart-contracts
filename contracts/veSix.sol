@@ -10,7 +10,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {Pausable} from "@openzeppelin/contracts/security/Pausable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import "./interfaces/IRewardDistributor.sol";
+import "../interfaces/IRewardDistributor.sol";
 
 contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     using SafeERC20 for IERC20;
@@ -23,6 +23,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     error LockNotExpired();
     error ZeroReward();
     error InvalidToken();
+    error InvalidArtProxy(); 
     error ZeroAddress();
     error DeadlineExpired();
     error ExceedsMaxLocks();
@@ -70,6 +71,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     IERC20 private immutable i_lockedToken;
     IRewardsDistributor private immutable i_distributor;
     
+    
     uint32 private _nextTokenId;
     mapping(uint256 => LockPosition) private _locks;
     mapping(address => uint8) private _userLockCount;
@@ -80,6 +82,8 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     mapping(uint256 => uint32) public userPointEpoch;
     mapping(uint256 => mapping(uint32 => Point)) public userPointHistory;
     mapping(uint32 => int128) public slopeChanges;
+    address public artProxy;
+    uint32 MAX_BLOCK_DRIFT = 15;
     uint128 private _totalWeightedSupply;
 
     // Emergency recovery
@@ -300,6 +304,28 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         }
     }
 
+    function _beforeTokenTransfer(
+        address from,
+        uint256 tokenId
+    ) internal {
+        if (from != address(0) && address(i_distributor) != address(0)) { // Skip if minting
+            i_distributor.claim(tokenId);
+        }
+        
+    }
+
+     function transferFrom(address from, address to, uint256 tokenId) public virtual override {
+        _beforeTokenTransfer(from, tokenId);
+        super.transferFrom(from,to, tokenId);
+     }
+
+    function safeTransferFrom(address from, address to, uint256 tokenId, bytes memory data) public virtual override {
+         _beforeTokenTransfer(from, tokenId);
+         super.safeTransferFrom(from, to, tokenId, data);
+    }
+
+
+
     function withdraw(uint256 tokenId) external nonReentrant {
         address owner = _ownerOf(tokenId);
         if (owner == address(0)) revert TokenNotExists();
@@ -508,6 +534,16 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         return uint128(uint256(uint128(lastPoint.bias)));
     }
 
+    function getMinMultiplier(uint128 amount, uint32 lockDuration) public view returns (uint128) {
+    // Reduce duration by max block drift
+    uint32 minDuration = lockDuration > MAX_BLOCK_DRIFT ? lockDuration - MAX_BLOCK_DRIFT : lockDuration;
+    
+    // Calculate multiplier with reduced duration
+    uint256 slopeCalc = (uint256(amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
+    uint128 slope = uint128(slopeCalc);
+    return uint128(BASE_MULTIPLIER + (uint256(slope) * minDuration));
+}
+
     // Emergency functions
     function enableEmergencyMode() external onlyOwner {
         _emergencyMode = true;
@@ -533,6 +569,10 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         emit EmergencyWithdraw(msg.sender, tokenId, amount);
     }
 
+    function unPause () external onlyOwner {
+        _unpause();
+    }
+
     // View functions
     function getUserLockCount(address user) external view returns (uint8) {
         return _userLockCount[user];
@@ -545,7 +585,26 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     function totalWeightedSupply() external view returns (uint128) {
         return _totalWeightedSupply;
     }
+
+    function setArtProxy(address _artProxy) external onlyOwner {
+    if (_artProxy == address(0)) revert ZeroAddress();
+    artProxy = _artProxy;
 }
+
+function tokenURI(uint256 tokenId) public view virtual override returns (string memory) {
+    if (_ownerOf(tokenId) == address(0)) revert TokenNotExists();
+    if (artProxy == address(0)) revert InvalidArtProxy();
+    
+    // Delegate tokenURI call to art proxy
+    (bool success, bytes memory data) = artProxy.staticcall(
+        abi.encodeWithSignature("tokenURI(uint256)", tokenId)
+    );
+    require(success, "Art proxy call failed");
+    
+    return abi.decode(data, (string));
+}
+}
+
     
 
     
