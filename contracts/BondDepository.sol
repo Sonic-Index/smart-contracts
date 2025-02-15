@@ -263,7 +263,7 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
             uint256 amount = calculateLinearPayout(user, i);
             
             if (amount > 0) {
-                currentBond.amountOwed -= amount;
+                bondInfo[user][i].amountOwed -= amount;
                 totalRedeemed += amount;
                 
                 // Scale amount by token decimals for transfer
