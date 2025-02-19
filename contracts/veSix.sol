@@ -34,6 +34,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     error LockNotExists();
     error MultiplierTooHigh();
     error InvalidMultiplier();
+    error ArithmeticError();
 
 
 
@@ -360,8 +361,11 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         delete _locks[tokenId];
         
         uint128 multiplier = getCurrentMultiplier(tokenId);
-        uint256 weightedAmount = (uint256(amount) * multiplier) / PRECISION;
-        _totalWeightedSupply -= uint128(weightedAmount);
+        uint256 weightedAmount = (uint256(amount) * uint256(multiplier)) / PRECISION;
+        if (weightedAmount / uint256(amount) != uint256(multiplier)) revert ArithmeticError();
+        uint256 weightedSupplyIncrease = weightedAmount / PRECISION;
+        if (weightedSupplyIncrease > type(uint128).max) revert InvalidAmount();
+        _totalWeightedSupply -= uint128(weightedSupplyIncrease);
         
         _checkpoint(tokenId, oldLock, LockedBalance(0, 0));
         
@@ -377,6 +381,29 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         emit Withdraw(msg.sender, tokenId, amount);
     }
 
+    function _calculateLockParameters(
+        uint128 amount,
+        uint32 lockDuration,
+        uint128 minMultiplier
+    ) internal pure returns (uint128 slope, uint128 multiplier) {
+        // Calculate slope with safe math
+        uint256 slopeCalc = (uint256(amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
+        if (slopeCalc > type(uint128).max) revert InvalidAmount();
+        slope = uint128(slopeCalc);
+        
+        // Verify minimum multiplier
+        multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * lockDuration));
+        if (multiplier < minMultiplier) revert SlippageExceeded();
+    }
+
+    function _updateWeightedSupply(uint128 amount, uint128 multiplier) internal {
+        uint256 weightedAmount = uint256(amount) * uint256(multiplier);
+        if (weightedAmount / uint256(amount) != uint256(multiplier)) revert ArithmeticError();
+        uint256 weightedSupplyIncrease = weightedAmount / PRECISION;
+        if (weightedSupplyIncrease > type(uint128).max) revert InvalidAmount();
+        _totalWeightedSupply += uint128(weightedSupplyIncrease);
+    }
+
     function createLock(
         uint128 amount,
         uint32 lockDuration,
@@ -389,14 +416,8 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         
         uint32 unlockTime = uint32(block.timestamp) + lockDuration;
         
-        // Calculate slope with safe math
-        uint256 slopeCalc = (uint256(amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
-        if (slopeCalc > type(uint128).max) revert InvalidAmount();
-        uint128 slope = uint128(slopeCalc);
+        (uint128 slope, uint128 multiplier) = _calculateLockParameters(amount, lockDuration, minMultiplier);
         
-        // Verify minimum multiplier
-        uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * lockDuration));
-        if (multiplier < minMultiplier) revert SlippageExceeded();
         // Create new lock balance
         LockedBalance memory newLock = LockedBalance({
             amount: int128(uint128(amount)),
@@ -405,25 +426,29 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         
         // Checkpoint before modifying state
         _checkpoint(0, LockedBalance(0, 0), newLock);
+        
         // Transfer tokens using SafeERC20
         uint256 balanceBefore = i_lockedToken.balanceOf(address(this));
         i_lockedToken.safeTransferFrom(msg.sender, address(this), amount);
         if (i_lockedToken.balanceOf(address(this)) != balanceBefore + amount) 
             revert TransferFailed();
+        
         unchecked {
             tokenId = _nextTokenId++;
             _userLockCount[msg.sender]++;
         }
+        
         _safeMint(msg.sender, tokenId);
+        
         _locks[tokenId] = LockPosition({
             amount: amount,
             endTime: unlockTime,
             lastUpdate: uint32(block.timestamp),
             slope: slope
         });
-        uint256 weightedSupplyIncrease = (uint256(amount) * multiplier) / PRECISION;
-        if (weightedSupplyIncrease > type(uint128).max) revert InvalidAmount();
-        _totalWeightedSupply += uint128(weightedSupplyIncrease);
+        
+        _updateWeightedSupply(amount, multiplier);
+        
         emit Deposit(msg.sender, tokenId, amount, unlockTime);
     }
 
@@ -764,7 +789,5 @@ function getExpectedMultiplier(uint128 amount, uint32 duration) public pure retu
     return uint128(totalMultiplier);
 }
 }
-
-    
 
     
