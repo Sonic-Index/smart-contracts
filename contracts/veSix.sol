@@ -73,7 +73,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     
     
     uint32 private _nextTokenId;
-    mapping(uint256 => LockPosition) public _locks;
+    mapping(uint256 => LockPosition) public _locks; 
     mapping(address => uint8) public _userLockCount;
     
     // Point history state
@@ -220,7 +220,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
             _epoch
         );
 
-        epoch = _epoch;
+        epoch = _epoch + 1;
     }
 
     function _processWeeklyCheckpoints(
@@ -506,7 +506,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     
     // Calculate new multiplier using existing function
     uint128 multiplier = getExpectedMultiplier(newAmount, remainingDuration);
-    if (multiplier < minMultiplier) revert SlippageExceeded(); 
+    if (multiplier < minMultiplier) revert SlippageExceeded();
     
     // Transfer tokens first
     uint256 balanceBefore = i_lockedToken.balanceOf(address(this));
@@ -715,6 +715,23 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     artProxy = _artProxy;
 }
 
+    function tokensForOwner(address owner) external view returns(uint256[] memory tokenIds) {
+        uint8 count = _userLockCount[owner];
+        tokenIds = new uint256[](count);
+        if (count == 0) return tokenIds;
+        
+        uint256 currentIndex = 0;
+        for (uint256 id = 0; id < _nextTokenId; id++) {
+            if (_ownerOf(id) == owner) {
+                tokenIds[currentIndex] = id;
+                currentIndex++;
+                if (currentIndex >= count) break;
+            }
+        }
+        
+        return tokenIds;
+    }
+
 function tokenURI(uint256 tokenId) public view virtual override returns (string memory) {
     if (_ownerOf(tokenId) == address(0)) revert TokenNotExists();
     if (artProxy == address(0)) revert InvalidArtProxy();
@@ -728,7 +745,7 @@ function tokenURI(uint256 tokenId) public view virtual override returns (string 
     return abi.decode(data, (string));
 }
 
-    function getExpectedMultiplier(uint128 amount, uint32 duration) public pure returns (uint128) {
+function getExpectedMultiplier(uint128 amount, uint32 duration) public pure returns (uint128) {
     if (duration == 0 || duration > MAXTIME) revert InvalidDuration();
     if (amount == 0) revert InvalidAmount();
     
@@ -747,10 +764,6 @@ function tokenURI(uint256 tokenId) public view virtual override returns (string 
     return uint128(totalMultiplier);
 }
 }
-
-    
-
-    
 
     
 
