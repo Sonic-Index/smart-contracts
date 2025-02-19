@@ -77,6 +77,13 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         if (_veSix == address(0) || _distributor == address(0)) revert ZeroAddress();
         if (_rewardTokens.length > MAX_REWARD_TOKENS) revert TooManyRewardTokens();
         
+        // Check for duplicates
+        for(uint i = 0; i < _rewardTokens.length; i++) {
+            for(uint j = i + 1; j < _rewardTokens.length; j++) {
+                if (_rewardTokens[i] == _rewardTokens[j]) revert("Duplicate token");
+            }
+        }
+        
         veSix = IVeSix(_veSix);
         distributor = _distributor;
         
@@ -91,6 +98,11 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         emit DistributorUpdated(_newDistributor);
     }
 
+    function addRewardToken(address token) external onlyDistributor {
+        _addRewardToken(token);
+
+    }
+
     function _addRewardToken(address token) internal {
         if (token == address(0)) revert ZeroAddress();
         if (isRewardToken[token]) revert TokenAlreadyAdded();
@@ -100,7 +112,7 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         currentPeriod[token] = 1;
         
         Reward storage reward = rewardData[token];
-        reward.lastTotalSupply = getTotalSupply();
+        reward.lastTotalSupply = veSix.epoch() == 0 ? 0 : getTotalSupply();
         reward.periodId = currentPeriod[token];
         
         emit RewardTokenAdded(token, currentPeriod[token]);
@@ -108,17 +120,27 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
 
     function getTotalSupply() public view returns (uint256) {
         uint256 epoch = veSix.epoch();
-        if (epoch == 0) revert InvalidVeSupply();
+        if (epoch == 0) return 0;
         
         IVeSix.Point memory point = veSix.point_history(epoch);
         if (point.ts == 0) revert InvalidVeSupply();
         
-        int128 dt = 0;
+        // Safe time delta calculation
+        uint256 timeDelta;
         if (block.timestamp > point.ts) {
-            dt = int128(int256(block.timestamp - point.ts));
+            timeDelta = block.timestamp - point.ts;
+            // Check if timeDelta is too large for int256 first
+            if (timeDelta > 2**255 - 1) {
+                return 0;
+            }
+            // Then check if it fits in int128
+            if (timeDelta > 2**127 - 1) {
+                return 0;
+            }
         }
         
         unchecked {
+            int128 dt = int128(int256(timeDelta));
             int256 bias_slope_product = point.bias - point.slope * dt;
             if (bias_slope_product <= 0) return 0;
             return uint256(bias_slope_product);
@@ -127,7 +149,7 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
 
     modifier updateReward(uint256 tokenId) {
         uint256 veSupply = getTotalSupply();
-        if (veSupply == 0) revert InvalidVeSupply();
+        if (veSupply == 0 && veSix.epoch() > 0) revert InvalidVeSupply();
         
         for(uint i = 0; i < rewardTokens.length; i++) {
             address token = rewardTokens[i];
@@ -161,22 +183,50 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         if (timeDelta == 0) return reward.rewardPerVeTokenStored;
         
         uint256 rewardAmount = timeDelta * reward.rewardRate;
-        return reward.rewardPerVeTokenStored + ((rewardAmount * PRECISION) / _supply);
+        if (rewardAmount / timeDelta != reward.rewardRate) revert ArithmeticError();
+        uint256 rewardPerToken = (rewardAmount * PRECISION) / _supply;
+        if (rewardPerToken > type(uint256).max - reward.rewardPerVeTokenStored) revert ArithmeticError();
+        return reward.rewardPerVeTokenStored + rewardPerToken;
     }
 
     function earned(uint256 tokenId, address _rewardsToken) public view returns (uint256) {
         if (!isRewardToken[_rewardsToken]) return 0;
         
+        Reward memory reward = rewardData[_rewardsToken];
+        
+        // If rewards haven't started yet, return 0
+        if (reward.lastUpdateTime == 0) {
+            return 0;
+        }
+        
+        uint256 epoch = veSix.epoch();
+        if (epoch == 0) {
+            // Use the first reward notification time as starting point
+            uint256 balance = veSix.balanceOfNFTAt(tokenId, reward.lastUpdateTime);
+            if (balance == 0) return rewards[_rewardsToken][tokenId];
+            
+            uint256 rewardPerTokenStored = _calculateRewardPerToken(
+                _rewardsToken, 
+                reward.lastTotalSupply
+            );
+            
+            uint256 pendingReward = (balance * 
+                (rewardPerTokenStored - userRewardPerTokenPaid[_rewardsToken][tokenId])) / PRECISION;
+                
+            return rewards[_rewardsToken][tokenId] + pendingReward;
+        }
+        
+        // Normal epoch > 0 calculation
         uint256 balance = veSix.balanceOfNFTAt(tokenId, block.timestamp);
         if (balance == 0) return rewards[_rewardsToken][tokenId];
         
         uint256 rewardPerTokenStored = _calculateRewardPerToken(
             _rewardsToken, 
-            rewardData[_rewardsToken].lastTotalSupply
+            reward.lastTotalSupply
         );
         
-        uint256 pendingReward = balance * 
-            (rewardPerTokenStored - userRewardPerTokenPaid[_rewardsToken][tokenId]) / PRECISION;
+        uint256 pendingReward = (balance * 
+            (rewardPerTokenStored - userRewardPerTokenPaid[_rewardsToken][tokenId])) / PRECISION;
             
         return rewards[_rewardsToken][tokenId] + pendingReward;
     }
@@ -210,10 +260,12 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
             newRate = reward / DURATION;
         } else {
             uint256 remaining = rewardInfo.periodFinish - block.timestamp;
+            if (remaining > type(uint256).max / rewardInfo.rewardRate) revert ArithmeticError();
             uint256 leftover = remaining * rewardInfo.rewardRate;
             
             if (reward > type(uint256).max - leftover) revert ArithmeticError();
             newRate = (reward + leftover) / DURATION;
+            if ((reward + leftover) % DURATION != 0) revert ArithmeticError();
         }
         
         if (newRate < MINIMUM_RATE) revert RateTooLow();
@@ -236,7 +288,7 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         
         for(uint i = 0; i < tokenIds.length; i++) {
             if (veSix.isApprovedOrOwner(msg.sender, tokenIds[i])) {
-                try this.claim(tokenIds[i]) {} catch {}
+                try claim(tokenIds[i]) {} catch {}
             }
         }
     }
@@ -244,17 +296,23 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
     function removeRewardToken(address _rewardsToken) external onlyDistributor {
         if (!isRewardToken[_rewardsToken]) revert InvalidRewardToken();
         
+        Reward storage rewardInfo = rewardData[_rewardsToken];
+        if (block.timestamp < rewardInfo.periodFinish) revert("Active rewards period");
+        if (rewardInfo.queuedRewards > 0) revert("Pending rewards");
+        
         uint256 currentTokenPeriod = currentPeriod[_rewardsToken];
         
         uint256 epoch = veSix.epoch();
         for (uint256 i = 1; i <= epoch; i++) {
-            uint256 currentReward = earned(i, _rewardsToken);
-            if (currentReward > 0) {
-                historicalRewards[_rewardsToken][i] = HistoricalReward({
-                    amount: currentReward,
-                    periodId: currentTokenPeriod
-                });
-            }
+            try veSix.ownerOf(i) returns (address) {  // Check if token exists
+                uint256 currentReward = earned(i, _rewardsToken);
+                if (currentReward > 0) {
+                    historicalRewards[_rewardsToken][i] = HistoricalReward({
+                        amount: currentReward,
+                        periodId: currentTokenPeriod
+                    });
+                }
+            } catch {}
         }
         
         isRewardToken[_rewardsToken] = false;
@@ -308,6 +366,22 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         uint256 periodId
     ) internal {
         if (amount == 0) return;
+        
+        // If token is locked token, auto-compound
+        if (token == veSix.lockedToken()) {
+            if (amount > type(uint128).max) revert("Amount too large");
+            uint128 currentMultiplier = veSix.getCurrentMultiplier(tokenId);
+            if (currentMultiplier == 0) revert("Invalid multiplier");
+            IERC20(token).approve(address(veSix), amount);
+            veSix.increaseLockAmount(
+                tokenId, 
+                uint128(amount), 
+                block.timestamp, 
+                currentMultiplier  // Use current multiplier as minimum
+            );
+            emit RewardPaid(tokenId, token, amount, periodId);
+            return;
+        }
         
         uint256 preBalance = IERC20(token).balanceOf(address(this));
         if (preBalance < amount) revert InsufficientBalance();
