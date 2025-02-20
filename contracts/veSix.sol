@@ -26,6 +26,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     error InvalidArtProxy(); 
     error ZeroAddress();
     error DeadlineExpired();
+    error LockExpired();
     error ExceedsMaxLocks();
     error InvalidRewardRate();
     error SlippageExceeded();
@@ -131,18 +132,18 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
 ); 
 
     constructor(
-        address lockedToken,
+        address _lockedToken,
         address distributor,
         address emergencyRecovery,
         string memory name,
         string memory symbol
     ) ERC721(name, symbol) Ownable(msg.sender) {
-        if (lockedToken == address(0) || 
+        if (_lockedToken == address(0) || 
             distributor == address(0) || 
             emergencyRecovery == address(0)) revert ZeroAddress();
             
         _pause();
-        i_lockedToken = IERC20(lockedToken);
+        i_lockedToken = IERC20(_lockedToken);
         i_distributor = IRewardsDistributor(distributor);
         _emergencyRecoveryAddress = emergencyRecovery;
 
@@ -453,67 +454,69 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     }
 
     function extendLock(
-        uint256 tokenId,
-        uint32 newDuration,
-        uint256 deadline,
-        uint128 minMultiplier
-    ) external nonReentrant whenNotPaused validDeadline(deadline) {
-        // Check ownership
-        if (ownerOf(tokenId) != msg.sender) revert NotTokenOwner();
-        
-        // Get current lock
-        LockPosition memory lock = _locks[tokenId];
-        if (lock.amount == 0) revert LockNotExists();
-        
-        // Check if lock is expired
-        if (uint32(block.timestamp) >= lock.endTime) revert LockNotExpired();
-        
-        // Calculate new end time
-        uint32 newEndTime = uint32(block.timestamp) + newDuration;
-        if (newDuration == 0 || newEndTime > uint32(block.timestamp) + MAXTIME) 
-            revert InvalidDuration();
-        
-        // Calculate new slope
-        uint256 slopeCalc = (uint256(lock.amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
-        if (slopeCalc > type(uint128).max) revert InvalidAmount();
-        uint128 newSlope = uint128(slopeCalc);
-        
-        // Calculate new multiplier and verify against minimum
-        uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(newSlope) * newDuration));
-        if (multiplier < minMultiplier) revert SlippageExceeded();
-        if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
-        
-        // Create old and new lock balances for checkpoint
-        LockedBalance memory oldLocked = LockedBalance({
-            amount: int128(uint128(lock.amount)),
-            end: lock.endTime
-        });
-        
-        LockedBalance memory newLocked = LockedBalance({
-            amount: int128(uint128(lock.amount)),
-            end: newEndTime
-        });
-        
-        // Update state
-        _locks[tokenId] = LockPosition({
-            amount: lock.amount,
-            endTime: newEndTime,
-            lastUpdate: uint32(block.timestamp),
-            slope: newSlope
-        });
-        
-        // Update weighted supply
-        uint256 oldWeightedAmount = (uint256(lock.amount) * getCurrentMultiplier(tokenId)) / PRECISION;
-        uint256 newWeightedAmount = (uint256(lock.amount) * multiplier) / PRECISION;
-        _totalWeightedSupply = _totalWeightedSupply - uint128(oldWeightedAmount) + uint128(newWeightedAmount);
-        
-        // Checkpoint
-        _checkpoint(tokenId, oldLocked, newLocked);
-        
-        emit LockExtended(msg.sender, tokenId, newEndTime, multiplier);
+    uint256 tokenId,
+    uint32 additionalDuration,
+    uint256 deadline,
+    uint128 minMultiplier
+) external nonReentrant whenNotPaused validDeadline(deadline) {
+    // Check ownership
+    if (ownerOf(tokenId) != msg.sender) revert NotTokenOwner();
+    
+    // Get current lock
+    LockPosition memory lock = _locks[tokenId];
+    if (lock.amount == 0) revert LockNotExists();
+    
+    // Calculate new end time by adding duration to existing end time
+    uint32 newEndTime = lock.endTime + additionalDuration;
+    
+    // Ensure new end time doesn't exceed MAXTIME from current time
+    if (newEndTime > uint32(block.timestamp) + MAXTIME) 
+        revert InvalidDuration();
+    
+    // Calculate total remaining duration from current time
+    uint32 totalRemainingDuration = newEndTime - uint32(block.timestamp);
+    
+    // Calculate new slope
+    uint256 slopeCalc = (uint256(lock.amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
+    if (slopeCalc > type(uint128).max) revert InvalidAmount();
+    uint128 newSlope = uint128(slopeCalc);
+    
+    // Calculate new multiplier based on total remaining duration
+    uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(newSlope) * totalRemainingDuration));
+    if (multiplier < minMultiplier) revert SlippageExceeded();
+    if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
+    
+    // Create old and new lock balances for checkpoint
+    LockedBalance memory oldLocked = LockedBalance({
+        amount: int128(uint128(lock.amount)),
+        end: lock.endTime
+    });
+    
+    LockedBalance memory newLocked = LockedBalance({
+        amount: int128(uint128(lock.amount)),
+        end: newEndTime
+    });
+    
+    // Update state
+    _locks[tokenId] = LockPosition({
+        amount: lock.amount,
+        endTime: newEndTime,
+        lastUpdate: uint32(block.timestamp),
+        slope: newSlope
+    });
+    
+    // Update weighted supply
+    uint256 oldWeightedAmount = (uint256(lock.amount) * getCurrentMultiplier(tokenId)) / PRECISION;
+    uint256 newWeightedAmount = (uint256(lock.amount) * multiplier) / PRECISION;
+    _totalWeightedSupply = _totalWeightedSupply - uint128(oldWeightedAmount) + uint128(newWeightedAmount);
+    
+    // Checkpoint
+    _checkpoint(tokenId, oldLocked, newLocked);
+    
+    emit LockExtended(msg.sender, tokenId, newEndTime, multiplier);
 }
 
-  function increaseLockAmount(
+        function increaseLockAmount(
     uint256 tokenId,
     uint128 additionalAmount,
     uint256 deadline,
@@ -524,42 +527,47 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     
     LockPosition memory lock = _locks[tokenId];
     if (lock.amount == 0) revert LockNotExists();
-    if (uint32(block.timestamp) >= lock.endTime) revert LockNotExpired();
+    if (uint32(block.timestamp) >= lock.endTime) revert LockExpired();
+    
+    uint128 newAmount = lock.amount + additionalAmount;
+    uint128 newSlope = _calculateNewSlope(newAmount);
     
     uint32 remainingDuration = lock.endTime - uint32(block.timestamp);
-    uint128 newAmount = lock.amount + additionalAmount;
-    
-    // Calculate new multiplier using existing function
-    uint128 multiplier = getExpectedMultiplier(newAmount, remainingDuration);
+    uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(newSlope) * remainingDuration));
+    if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
     if (multiplier < minMultiplier) revert SlippageExceeded();
     
-    // Transfer tokens first
+    // Transfer tokens
     uint256 balanceBefore = i_lockedToken.balanceOf(address(this));
     i_lockedToken.safeTransferFrom(msg.sender, address(this), additionalAmount);
     if (i_lockedToken.balanceOf(address(this)) != balanceBefore + additionalAmount)
         revert TransferFailed();
     
-    // Create checkpoint structs
-    LockedBalance memory oldLocked = LockedBalance({
-        amount: int128(uint128(lock.amount)),
-        end: lock.endTime
+    // Update weighted supply
+    _updateWeightedSupply(
+        lock.amount,
+        getCurrentMultiplier(tokenId),
+        newAmount,
+        multiplier
+    );
+    
+    // Checkpoint
+    _checkpoint(
+        tokenId,
+        LockedBalance(int128(uint128(lock.amount)), lock.endTime),
+        LockedBalance(int128(uint128(newAmount)), lock.endTime)
+    );
+    
+    // Update lock state
+    _locks[tokenId] = LockPosition({
+        amount: newAmount,
+        endTime: lock.endTime,
+        lastUpdate: uint32(block.timestamp),
+        slope: newSlope
     });
-    
-    LockedBalance memory newLocked = LockedBalance({
-        amount: int128(uint128(newAmount)),
-        end: lock.endTime
-    });
-    
-    // Update state
-    _locks[tokenId].amount = newAmount;
-    _locks[tokenId].slope = uint128((uint256(newAmount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME);
-    _locks[tokenId].lastUpdate = uint32(block.timestamp);
-    
-    // Checkpoint and update weighted supply
-    _checkpoint(tokenId, oldLocked, newLocked);
     
     emit AmountIncreased(msg.sender, tokenId, additionalAmount, newAmount, multiplier);
-}
+}  
 
     function getTotalFarmingPower(uint32 timestamp) public view returns (uint128) {
         Point memory lastPoint = pointHistory[epoch];
@@ -600,6 +608,24 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         if (totalMultiplier < BASE_MULTIPLIER) revert InvalidMultiplier();
     
     return uint128(totalMultiplier);
+}
+
+    function _calculateNewSlope(uint128 totalAmount) private pure returns (uint128) {
+    uint256 slopeCalc = (uint256(totalAmount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
+    if (slopeCalc > type(uint128).max) revert InvalidAmount();
+    return uint128(slopeCalc);
+} 
+
+    function _updateWeightedSupply(
+    uint128 oldAmount,
+    uint128 oldMultiplier,
+    uint128 newAmount,
+    uint128 newMultiplier
+) internal {
+    uint256 oldWeighted = (uint256(oldAmount) * oldMultiplier) / PRECISION;
+    uint256 newWeighted = (uint256(newAmount) * newMultiplier) / PRECISION;
+    if (newWeighted < oldWeighted) revert ArithmeticError();
+    _totalWeightedSupply = _totalWeightedSupply - uint128(oldWeighted) + uint128(newWeighted);
 }
 
     function merge(
@@ -727,6 +753,10 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         return _userLockCount[user];
     }
 
+    function lockedToken() external view returns (IERC20) { 
+        return i_lockedToken;
+    }
+
     function isEmergencyMode() external view returns (bool) {
         return _emergencyMode;
     }
@@ -790,4 +820,3 @@ function getExpectedMultiplier(uint128 amount, uint32 duration) public pure retu
 }
 }
 
-    
