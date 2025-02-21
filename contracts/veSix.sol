@@ -804,19 +804,43 @@ function getExpectedMultiplier(uint128 amount, uint32 duration) public pure retu
     if (duration == 0 || duration > MAXTIME) revert InvalidDuration();
     if (amount == 0) revert InvalidAmount();
     
-    // Calculate slope
+    // Calculate slope with safe math
     uint256 slopeCalc = (uint256(amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
     if (slopeCalc > type(uint128).max) revert InvalidAmount();
     uint128 slope = uint128(slopeCalc);
     
     // Calculate multiplier
-    uint256 multiplierIncrease = uint256(slope) * duration;
-    uint256 totalMultiplier = BASE_MULTIPLIER + multiplierIncrease;
+    uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * duration));
+    if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
+    if (multiplier < BASE_MULTIPLIER) revert InvalidMultiplier();
     
-    if (totalMultiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
-    if (totalMultiplier < BASE_MULTIPLIER) revert InvalidMultiplier();
+    return multiplier;
+}
+
+// Add a new helper function to calculate expected multiplier for lock extensions
+function getExpectedExtendedMultiplier(uint256 tokenId, uint32 additionalDuration) public view returns (uint128) {
+    if (additionalDuration == 0) revert InvalidDuration();
     
-    return uint128(totalMultiplier);
+    LockPosition memory lock = _locks[tokenId];
+    if (lock.amount == 0) revert LockNotExists();
+    
+    // Calculate new end time
+    uint32 newEndTime = lock.endTime + additionalDuration;
+    uint32 remainingDuration = newEndTime - uint32(block.timestamp);
+    
+    if (remainingDuration > MAXTIME) revert InvalidDuration();
+    
+    // Calculate slope
+    uint256 slopeCalc = (uint256(lock.amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
+    if (slopeCalc > type(uint128).max) revert InvalidAmount();
+    uint128 slope = uint128(slopeCalc);
+    
+    // Calculate multiplier based on total remaining duration
+    uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * remainingDuration));
+    if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
+    if (multiplier < BASE_MULTIPLIER) revert InvalidMultiplier();
+    
+    return multiplier;
 }
 }
 
