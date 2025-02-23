@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import "../interfaces/IVeSix.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "./interfaces/IVeSix.sol";
 
-contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
-    using SafeERC20 for IERC20;
+contract VeSixRewardDistributor is Initializable, ReentrancyGuardUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
 
     struct Reward {
         uint256 periodFinish;
@@ -25,8 +25,10 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         uint256 periodId;
     }
 
+    // Storage variables v1
     IVeSix public veSix;
     address public distributor;
+
     
     mapping(address => Reward) public rewardData;
     mapping(address => bool) public isRewardToken;
@@ -43,6 +45,9 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MAX_REWARD_TOKENS = 50;
     
+    // Storage gap for future upgrades
+    uint256[50] private __gap;
+
     event RewardAdded(address token, uint256 reward, uint256 rewardRate, uint256 periodId);
     event RewardPaid(uint256 indexed tokenId, address indexed rewardsToken, uint256 reward, uint256 periodId);
     event RewardQueued(address token, uint256 amount, uint256 periodId);
@@ -63,19 +68,33 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
     error ArithmeticError();
     error TransferFailed();
     error InvalidState();
+    
 
     modifier onlyDistributor() {
         if (msg.sender != distributor) revert Unauthorized();
         _;
     }
 
-    function initialize(
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+     function initialize(
         address _veSix,
-        address _distributor,
-        address[] memory _rewardTokens
+        address _distributor
     ) external initializer {
         if (_veSix == address(0) || _distributor == address(0)) revert ZeroAddress();
+        
+        __ReentrancyGuard_init();
+        
+        veSix = IVeSix(_veSix);
+        distributor = _distributor;
+    }
+
+    function addInitialRewardTokens(address[] memory _rewardTokens) external onlyDistributor {
         if (_rewardTokens.length > MAX_REWARD_TOKENS) revert TooManyRewardTokens();
+        if (rewardTokens.length > 0) revert("Tokens already initialized");
         
         // Check for duplicates
         for(uint i = 0; i < _rewardTokens.length; i++) {
@@ -84,26 +103,24 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
             }
         }
         
-        veSix = IVeSix(_veSix);
-        distributor = _distributor;
-        
         for(uint i = 0; i < _rewardTokens.length; i++) {
             _addRewardToken(_rewardTokens[i]);
         }
     }
 
-    function updateDistributor(address _newDistributor) external onlyDistributor {
+    function updateDistributor(address _newDistributor) external  onlyDistributor{
         if (_newDistributor == address(0)) revert ZeroAddress();
         distributor = _newDistributor;
         emit DistributorUpdated(_newDistributor);
     }
+
 
     function addRewardToken(address token) external onlyDistributor {
         _addRewardToken(token);
 
     }
 
-    function _addRewardToken(address token) internal {
+     function _addRewardToken(address token) internal {
         if (token == address(0)) revert ZeroAddress();
         if (isRewardToken[token]) revert TokenAlreadyAdded();
         
@@ -112,40 +129,17 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         currentPeriod[token] = 1;
         
         Reward storage reward = rewardData[token];
-        reward.lastTotalSupply = veSix.epoch() == 0 ? 0 : getTotalSupply();
+        reward.lastTotalSupply = 0;  // Start at 0, will be updated on first reward
         reward.periodId = currentPeriod[token];
         
         emit RewardTokenAdded(token, currentPeriod[token]);
     }
 
+
     function getTotalSupply() public view returns (uint256) {
-        uint256 epoch = veSix.epoch();
-        if (epoch == 0) return 0;
-        
-        IVeSix.Point memory point = veSix.point_history(epoch);
-        if (point.ts == 0) revert InvalidVeSupply();
-        
-        // Safe time delta calculation
-        uint256 timeDelta;
-        if (block.timestamp > point.ts) {
-            timeDelta = block.timestamp - point.ts;
-            // Check if timeDelta is too large for int256 first
-            if (timeDelta > 2**255 - 1) {
-                return 0;
-            }
-            // Then check if it fits in int128
-            if (timeDelta > 2**127 - 1) {
-                return 0;
-            }
-        }
-        
-        unchecked {
-            int128 dt = int128(int256(timeDelta));
-            int256 bias_slope_product = point.bias - point.slope * dt;
-            if (bias_slope_product <= 0) return 0;
-            return uint256(bias_slope_product);
-        }
+        return veSix.totalWeightedSupply();
     }
+
 
     modifier updateReward(uint256 tokenId) {
         uint256 veSupply = getTotalSupply();
@@ -172,62 +166,42 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
                block.timestamp : rewardData[_rewardsToken].periodFinish;
     }
 
-    function _calculateRewardPerToken(address _rewardsToken, uint256 _supply) internal view returns (uint256) {
+      function _calculateRewardPerToken(address _rewardsToken, uint256 _supply) internal view returns (uint256) {
         Reward storage reward = rewardData[_rewardsToken];
         
         if (_supply == 0 || !isRewardToken[_rewardsToken]) {
             return reward.rewardPerVeTokenStored;
         }
         
+        // Calculate new rewards since last update
         uint256 timeDelta = lastTimeRewardApplicable(_rewardsToken) - reward.lastUpdateTime;
         if (timeDelta == 0) return reward.rewardPerVeTokenStored;
         
+        // Calculate additional rewardPerToken
         uint256 rewardAmount = timeDelta * reward.rewardRate;
-        if (rewardAmount / timeDelta != reward.rewardRate) revert ArithmeticError();
-        uint256 rewardPerToken = (rewardAmount * PRECISION) / _supply;
-        if (rewardPerToken > type(uint256).max - reward.rewardPerVeTokenStored) revert ArithmeticError();
-        return reward.rewardPerVeTokenStored + rewardPerToken;
+        uint256 additionalRewardPerToken = (rewardAmount * PRECISION) / _supply;
+        
+        // Add to existing cumulative rewardPerToken
+        return reward.rewardPerVeTokenStored + additionalRewardPerToken;
     }
-
     function earned(uint256 tokenId, address _rewardsToken) public view returns (uint256) {
         if (!isRewardToken[_rewardsToken]) return 0;
         
         Reward memory reward = rewardData[_rewardsToken];
+        if (reward.lastUpdateTime == 0) return 0;
         
-        // If rewards haven't started yet, return 0
-        if (reward.lastUpdateTime == 0) {
-            return 0;
-        }
-        
-        uint256 epoch = veSix.epoch();
-        if (epoch == 0) {
-            // Use the first reward notification time as starting point
-            uint256 balance = veSix.balanceOfNFTAt(tokenId, reward.lastUpdateTime);
-            if (balance == 0) return rewards[_rewardsToken][tokenId];
-            
-            uint256 rewardPerTokenStored = _calculateRewardPerToken(
-                _rewardsToken, 
-                reward.lastTotalSupply
-            );
-            
-            uint256 pendingReward = (balance * 
-                (rewardPerTokenStored - userRewardPerTokenPaid[_rewardsToken][tokenId])) / PRECISION;
-                
-            return rewards[_rewardsToken][tokenId] + pendingReward;
-        }
-        
-        // Normal epoch > 0 calculation
-        uint256 balance = veSix.balanceOfNFTAt(tokenId, block.timestamp);
+        // Convert to uint32 for VeSix
+        uint32 epochTimestamp = uint32((reward.lastUpdateTime / 3600) * 3600);
+        uint256 balance = veSix.getFarmingPower(tokenId, epochTimestamp);
         if (balance == 0) return rewards[_rewardsToken][tokenId];
         
-        uint256 rewardPerTokenStored = _calculateRewardPerToken(
-            _rewardsToken, 
-            reward.lastTotalSupply
-        );
+        // Rest of function remains the same
+        uint256 currentRewardPerToken = reward.rewardPerVeTokenStored;
+        uint256 userPaid = userRewardPerTokenPaid[_rewardsToken][tokenId];
+        uint256 rewardDelta = currentRewardPerToken >= userPaid ? 
+            currentRewardPerToken - userPaid : 0;
         
-        uint256 pendingReward = (balance * 
-            (rewardPerTokenStored - userRewardPerTokenPaid[_rewardsToken][tokenId])) / PRECISION;
-            
+        uint256 pendingReward = (balance * rewardDelta) / PRECISION;
         return rewards[_rewardsToken][tokenId] + pendingReward;
     }
 
@@ -235,52 +209,31 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         if (!isRewardToken[_rewardsToken]) revert InvalidRewardToken();
         if (amount == 0) revert InvalidState();
         
-        uint256 oldBalance = IERC20(_rewardsToken).balanceOf(address(this));
-        IERC20(_rewardsToken).safeTransferFrom(msg.sender, address(this), amount);
-        uint256 received = IERC20(_rewardsToken).balanceOf(address(this)) - oldBalance;
+        uint256 oldBalance = IERC20Upgradeable(_rewardsToken).balanceOf(address(this));
+        IERC20Upgradeable(_rewardsToken).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 received = IERC20Upgradeable(_rewardsToken).balanceOf(address(this)) - oldBalance;
         
         rewardData[_rewardsToken].queuedRewards += received;
         
         emit RewardQueued(_rewardsToken, received, rewardData[_rewardsToken].periodId);
     }
 
-    function notifyRewardAmount(address _rewardsToken, uint256 reward) external onlyDistributor updateReward(0) {
+     function notifyRewardAmount(address _rewardsToken, uint256 reward) external onlyDistributor {
         if (!isRewardToken[_rewardsToken]) revert InvalidRewardToken();
         if (reward == 0) revert InvalidState();
         
-        Reward storage rewardInfo = rewardData[_rewardsToken];
-        uint256 balance = IERC20(_rewardsToken).balanceOf(address(this));
-        if (balance < reward) revert InsufficientBalance();
+        // Force update rewardPerVeTokenStored with old rate before changing rate
+        uint256 veSupply = getTotalSupply();
+        rewardData[_rewardsToken].rewardPerVeTokenStored = _calculateRewardPerToken(_rewardsToken, veSupply);
         
-        uint256 currentSupply = getTotalSupply();
-        if (currentSupply == 0) revert InvalidVeSupply();
+        // Set new rate
+        uint256 newRate = reward / DURATION;
+        rewardData[_rewardsToken].rewardRate = newRate;
+        rewardData[_rewardsToken].lastUpdateTime = block.timestamp;
+        rewardData[_rewardsToken].periodFinish = block.timestamp + DURATION;
+        rewardData[_rewardsToken].lastTotalSupply = veSupply;
         
-        uint256 newRate;
-        if (block.timestamp >= rewardInfo.periodFinish) {
-            newRate = reward / DURATION;
-        } else {
-            uint256 remaining = rewardInfo.periodFinish - block.timestamp;
-            if (remaining > type(uint256).max / rewardInfo.rewardRate) revert ArithmeticError();
-            uint256 leftover = remaining * rewardInfo.rewardRate;
-            
-            if (reward > type(uint256).max - leftover) revert ArithmeticError();
-            newRate = (reward + leftover) / DURATION;
-            if ((reward + leftover) % DURATION != 0) revert ArithmeticError();
-        }
-        
-        if (newRate < MINIMUM_RATE) revert RateTooLow();
-        if (newRate > MAXIMUM_RATE) revert RateTooHigh();
-        
-        uint256 totalRewards = newRate * DURATION;
-        if (totalRewards > balance) revert InsufficientBalance();
-        
-        rewardInfo.rewardRate = newRate;
-        rewardInfo.lastUpdateTime = block.timestamp;
-        rewardInfo.periodFinish = block.timestamp + DURATION;
-        rewardInfo.queuedRewards = 0;
-        rewardInfo.lastTotalSupply = currentSupply;
-        
-        emit RewardAdded(_rewardsToken, reward, newRate, rewardInfo.periodId);
+        emit RewardAdded(_rewardsToken, reward, newRate, rewardData[_rewardsToken].periodId);
     }
 
     function getRewardForTokens(uint256[] calldata tokenIds) external {
@@ -288,7 +241,7 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
         
         for(uint i = 0; i < tokenIds.length; i++) {
             if (veSix.isApprovedOrOwner(msg.sender, tokenIds[i])) {
-                try claim(tokenIds[i]) {} catch {}
+                claim(tokenIds[i]) ;
             }
         }
     }
@@ -330,7 +283,7 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
     }
 
     function claim(uint256 tokenId) public nonReentrant updateReward(tokenId) {
-        if (!veSix.isApprovedOrOwner(msg.sender, tokenId)) revert Unauthorized();
+        if (msg.sender != veSix.ownerOf(tokenId)) revert Unauthorized();
         
         bool hasReward;
         address[] memory allTokens = getRewardTokens();
@@ -372,7 +325,7 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
             if (amount > type(uint128).max) revert("Amount too large");
             uint128 currentMultiplier = veSix.getCurrentMultiplier(tokenId);
             if (currentMultiplier == 0) revert("Invalid multiplier");
-            IERC20(token).approve(address(veSix), amount);
+            IERC20Upgradeable(token).approve(address(veSix), amount);
             veSix.increaseLockAmount(
                 tokenId, 
                 uint128(amount), 
@@ -383,14 +336,14 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
             return;
         }
         
-        uint256 preBalance = IERC20(token).balanceOf(address(this));
+        uint256 preBalance = IERC20Upgradeable(token).balanceOf(address(this));
         if (preBalance < amount) revert InsufficientBalance();
         
-        uint256 recipientPreBalance = IERC20(token).balanceOf(to);
+        uint256 recipientPreBalance = IERC20Upgradeable(token).balanceOf(to);
         
-        IERC20(token).safeTransfer(to, amount);
+        IERC20Upgradeable(token).safeTransfer(to, amount);
         
-        uint256 recipientPostBalance = IERC20(token).balanceOf(to);
+        uint256 recipientPostBalance = IERC20Upgradeable(token).balanceOf(to);
         if (recipientPostBalance <= recipientPreBalance) revert TransferFailed();
         
         uint256 received = recipientPostBalance - recipientPreBalance;
@@ -451,4 +404,8 @@ contract VeSixRewardDistributor is ReentrancyGuard, Initializable {
     function getRewardTokenLength() external view returns (uint256) {
         return rewardTokens.length;
     }
+    
+    
+
 }
+
