@@ -3,17 +3,21 @@
 
 pragma solidity 0.8.27;
 
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import {Pausable} from "@openzeppelin/contracts/security/Pausable.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import "../interfaces/IRewardDistributor.sol";
+import {ERC721Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
+import {IERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import {SafeERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "./interfaces/IRewardDistributor.sol";
 
-contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
-    using SafeERC20 for IERC20;
+contract VeSixUpgradeable is 
+    ERC721Upgradeable, 
+    ReentrancyGuardUpgradeable, 
+    PausableUpgradeable, 
+    OwnableUpgradeable
+{
+    using SafeERC20Upgradeable for IERC20Upgradeable;
 
     // Custom errors
     error InvalidAmount();
@@ -70,8 +74,8 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     int128 private constant iMAXTIME = int128(uint128(MAXTIME));
 
     // State variables
-    IERC20 private immutable i_lockedToken;
-    IRewardsDistributor private immutable i_distributor;
+    IERC20Upgradeable private _lockedToken;
+    IRewardsDistributor private _distributor;
     
     
     uint32 private _nextTokenId;
@@ -131,25 +135,45 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         uint128 newMultiplier
 ); 
 
-    constructor(
-        address _lockedToken,
-        address distributor,
+    mapping(uint256 => uint256) public tokenEpoch;  // tokenId => creation epoch
+
+    // Storage gap for future upgrades
+    uint256[50] private __gap;
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(
+        address lockedToken_,
+      
         address emergencyRecovery,
         string memory name,
         string memory symbol
-    ) ERC721(name, symbol) Ownable(msg.sender) {
-        if (_lockedToken == address(0) || 
-            distributor == address(0) || 
+    ) public initializer {
+        if (lockedToken_ == address(0) || 
+
             emergencyRecovery == address(0)) revert ZeroAddress();
             
+        __ERC721_init(name, symbol);
+        __ReentrancyGuard_init();
+        __Pausable_init();
+        __Ownable_init(msg.sender);
+
         _pause();
-        i_lockedToken = IERC20(_lockedToken);
-        i_distributor = IRewardsDistributor(distributor);
+        _lockedToken = IERC20Upgradeable(lockedToken_);
         _emergencyRecoveryAddress = emergencyRecovery;
 
         // Initialize point history
         pointHistory[0].blk = uint32(block.number);
         pointHistory[0].ts = uint32(block.timestamp);
+    }
+
+    function setDistributor(address distributor_) external onlyOwner {
+        if (distributor_ == address(0)) revert ZeroAddress();
+        if (address(_distributor) != address(0)) revert("Distributor already set");
+        _distributor = IRewardsDistributor(distributor_);
     }
 
     // Modifiers
@@ -159,7 +183,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     }
 
     modifier checkRewardRate() {
-        if (i_distributor.getRewardForDuration() > MAX_REWARD_RATE) 
+        if (_distributor.getRewardForDuration() > MAX_REWARD_RATE) 
             revert MaxRewardRateExceeded();
         _;
     }
@@ -168,11 +192,18 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         LockPosition memory lock = _locks[tokenId];
         if (uint32(block.timestamp) >= lock.endTime) return BASE_MULTIPLIER;
         
-        uint32 timeLeft;
-        unchecked {
-            timeLeft = lock.endTime - uint32(block.timestamp);
-        }
-        return uint128(BASE_MULTIPLIER + (uint256(lock.slope) * timeLeft));
+        // Recalculate slope properly with PRECISION scaling
+        uint256 slopeCalc = (uint256(lock.amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / (MAXTIME * PRECISION);
+        if (slopeCalc > type(uint128).max) revert InvalidAmount();
+        uint128 slope = uint128(slopeCalc);
+        
+        uint32 timeLeft = lock.endTime - uint32(block.timestamp);
+        uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * timeLeft));
+        
+        if (multiplier > MAX_MULTIPLIER) return MAX_MULTIPLIER;
+        if (multiplier < BASE_MULTIPLIER) return BASE_MULTIPLIER;
+        
+        return multiplier;
     }
 
     function _checkpoint(
@@ -325,8 +356,8 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         address from,
         uint256 tokenId
     ) internal {
-        if (from != address(0) && address(i_distributor) != address(0)) { // Skip if minting
-            i_distributor.claim(tokenId);
+        if (from != address(0) && address(_distributor) != address(0)) { // Skip if minting
+            _distributor.claim(tokenId);
         }
         
     }
@@ -377,7 +408,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
             _userLockCount[msg.sender]--;
         }
         
-        i_lockedToken.safeTransfer(msg.sender, amount);
+        _lockedToken.safeTransfer(msg.sender, amount);
         
         emit Withdraw(msg.sender, tokenId, amount);
     }
@@ -387,22 +418,28 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         uint32 lockDuration,
         uint128 minMultiplier
     ) internal pure returns (uint128 slope, uint128 multiplier) {
-        // Calculate slope with safe math
-        uint256 slopeCalc = (uint256(amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
+        // First scale down amount by PRECISION
+        uint256 scaledAmount = uint256(amount) / PRECISION;  // = 6.48
+        
+        // Calculate slope with better scaling
+        // Instead of: slopeCalc = (scaledAmount * multiplierDiff) / MAXTIME
+        // Use: slopeCalc = (scaledAmount * multiplierDiff) / (MAXTIME * PRECISION)
+        uint256 multiplierDiff = MAX_MULTIPLIER - BASE_MULTIPLIER;  // = 3e18
+        uint256 slopeCalc = (scaledAmount * multiplierDiff) / (MAXTIME * PRECISION);
         if (slopeCalc > type(uint128).max) revert InvalidAmount();
         slope = uint128(slopeCalc);
         
-        // Verify minimum multiplier
-        multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * lockDuration));
+        // Calculate multiplier with additional scaling
+        uint256 multiplierIncrease = (uint256(slope) * lockDuration) / PRECISION;
+        multiplier = uint128(BASE_MULTIPLIER + multiplierIncrease);
+        
+        if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
         if (multiplier < minMultiplier) revert SlippageExceeded();
     }
 
     function _updateWeightedSupply(uint128 amount, uint128 multiplier) internal {
-        uint256 weightedAmount = uint256(amount) * uint256(multiplier);
-        if (weightedAmount / uint256(amount) != uint256(multiplier)) revert ArithmeticError();
-        uint256 weightedSupplyIncrease = weightedAmount / PRECISION;
-        if (weightedSupplyIncrease > type(uint128).max) revert InvalidAmount();
-        _totalWeightedSupply += uint128(weightedSupplyIncrease);
+        uint256 weightedAmount = uint256(amount) * uint256(multiplier) / PRECISION;
+        _totalWeightedSupply += uint128(weightedAmount);
     }
 
     function createLock(
@@ -429,9 +466,9 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         _checkpoint(0, LockedBalance(0, 0), newLock);
         
         // Transfer tokens using SafeERC20
-        uint256 balanceBefore = i_lockedToken.balanceOf(address(this));
-        i_lockedToken.safeTransferFrom(msg.sender, address(this), amount);
-        if (i_lockedToken.balanceOf(address(this)) != balanceBefore + amount) 
+        uint256 balanceBefore = _lockedToken.balanceOf(address(this));
+        _lockedToken.safeTransferFrom(msg.sender, address(this), amount);
+        if (_lockedToken.balanceOf(address(this)) != balanceBefore + amount) 
             revert TransferFailed();
         
         unchecked {
@@ -454,75 +491,57 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     }
 
     function extendLock(
-    uint256 tokenId,
-    uint32 additionalDuration,
-    uint256 deadline,
-    uint128 minMultiplier
-) external nonReentrant whenNotPaused validDeadline(deadline) {
-    // Check ownership
-    if (ownerOf(tokenId) != msg.sender) revert NotTokenOwner();
-    
-    // Get current lock
-    LockPosition memory lock = _locks[tokenId];
-    if (lock.amount == 0) revert LockNotExists();
-    
-    // Calculate new end time by adding duration to existing end time
-    uint32 newEndTime = lock.endTime + additionalDuration;
-    
-    // Ensure new end time doesn't exceed MAXTIME from current time
-    if (newEndTime > uint32(block.timestamp) + MAXTIME) 
-        revert InvalidDuration();
-    
-    // Calculate total remaining duration from current time
-    uint32 totalRemainingDuration = newEndTime - uint32(block.timestamp);
-    
-    // Calculate new slope
-    uint256 slopeCalc = (uint256(lock.amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
-    if (slopeCalc > type(uint128).max) revert InvalidAmount();
-    uint128 newSlope = uint128(slopeCalc);
-    
-    // Calculate new multiplier based on total remaining duration
-    uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(newSlope) * totalRemainingDuration));
-    if (multiplier < minMultiplier) revert SlippageExceeded();
-    if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
-    
-    // Create old and new lock balances for checkpoint
-    LockedBalance memory oldLocked = LockedBalance({
-        amount: int128(uint128(lock.amount)),
-        end: lock.endTime
-    });
-    
-    LockedBalance memory newLocked = LockedBalance({
-        amount: int128(uint128(lock.amount)),
-        end: newEndTime
-    });
-    
-    // Update state
-    _locks[tokenId] = LockPosition({
-        amount: lock.amount,
-        endTime: newEndTime,
-        lastUpdate: uint32(block.timestamp),
-        slope: newSlope
-    });
-    
-    // Update weighted supply
-    uint256 oldWeightedAmount = (uint256(lock.amount) * getCurrentMultiplier(tokenId)) / PRECISION;
-    uint256 newWeightedAmount = (uint256(lock.amount) * multiplier) / PRECISION;
-    _totalWeightedSupply = _totalWeightedSupply - uint128(oldWeightedAmount) + uint128(newWeightedAmount);
-    
-    // Checkpoint
-    _checkpoint(tokenId, oldLocked, newLocked);
-    
-    emit LockExtended(msg.sender, tokenId, newEndTime, multiplier);
-}
+        uint256 tokenId,
+        uint32 additionalDuration,
+        uint256 deadline,
+        uint128 minMultiplier
+    ) external nonReentrant whenNotPaused validDeadline(deadline) {
+        if (ownerOf(tokenId) != msg.sender) revert NotTokenOwner();
+        
+        LockPosition memory lock = _locks[tokenId];
+        if (lock.amount == 0) revert LockNotExists();
+        
+        // Calculate new end time
+        uint32 newEndTime = lock.endTime + additionalDuration;
+        uint32 totalRemainingDuration = newEndTime - uint32(block.timestamp);
+        if (totalRemainingDuration > MAXTIME) revert InvalidDuration();
+        
+        // Calculate new slope and multiplier with proper scaling
+        uint128 newSlope = _calculateNewSlope(lock.amount);
+        uint128 multiplier = _calculateMultiplier(newSlope, totalRemainingDuration);
+        if (multiplier < minMultiplier) revert SlippageExceeded();
+        
+        // Update weighted supply
+        _updateWeightedSupply(
+            lock.amount,
+            multiplier
+        );
+        
+        // Checkpoint
+        _checkpoint(
+            tokenId,
+            LockedBalance(int128(uint128(lock.amount)), lock.endTime),
+            LockedBalance(int128(uint128(lock.amount)), newEndTime)
+        );
+        
+        // Update lock state
+        _locks[tokenId] = LockPosition({
+            amount: lock.amount,
+            endTime: newEndTime,
+            lastUpdate: uint32(block.timestamp),
+            slope: newSlope
+        });
+        
+        emit LockExtended(msg.sender, tokenId, newEndTime, multiplier);
+    }
 
-        function increaseLockAmount(
+         function increaseLockAmount(
     uint256 tokenId,
     uint128 additionalAmount,
     uint256 deadline,
     uint128 minMultiplier
 ) external nonReentrant whenNotPaused validDeadline(deadline) {
-    if (ownerOf(tokenId) != msg.sender) revert NotTokenOwner();
+    if (ownerOf(tokenId) != tx.origin)  revert NotTokenOwner();
     if (additionalAmount == 0) revert InvalidAmount();
     
     LockPosition memory lock = _locks[tokenId];
@@ -538,16 +557,14 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     if (multiplier < minMultiplier) revert SlippageExceeded();
     
     // Transfer tokens
-    uint256 balanceBefore = i_lockedToken.balanceOf(address(this));
-    i_lockedToken.safeTransferFrom(msg.sender, address(this), additionalAmount);
-    if (i_lockedToken.balanceOf(address(this)) != balanceBefore + additionalAmount)
+    uint256 balanceBefore = _lockedToken.balanceOf(address(this));
+    _lockedToken.safeTransferFrom(msg.sender, address(this), additionalAmount);
+    if (_lockedToken.balanceOf(address(this)) != balanceBefore + additionalAmount)
         revert TransferFailed();
     
-    // Update weighted supply
+    // Update weighted supply with only the additional amount
     _updateWeightedSupply(
-        lock.amount,
-        getCurrentMultiplier(tokenId),
-        newAmount,
+        additionalAmount,
         multiplier
     );
     
@@ -600,33 +617,26 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         return uint128(uint256(uint128(lastPoint.bias)));
     }
 
+    function _calculateNewSlope(uint128 amount) private pure returns (uint128) {
+        uint256 value = uint256(amount);
+        uint256 slopeCalc = value / MAXTIME;
+        if (slopeCalc > type(uint128).max) revert InvalidAmount();
+        return uint128(slopeCalc);
+    }
+
     function _calculateMultiplier(uint128 slope, uint32 duration) internal pure returns (uint128) {
-         uint256 multiplierIncrease = uint256(slope) * duration;
-         uint256 totalMultiplier = BASE_MULTIPLIER + multiplierIncrease;
-    
-        if (totalMultiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
-        if (totalMultiplier < BASE_MULTIPLIER) revert InvalidMultiplier();
-    
-    return uint128(totalMultiplier);
-}
-
-    function _calculateNewSlope(uint128 totalAmount) private pure returns (uint128) {
-    uint256 slopeCalc = (uint256(totalAmount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
-    if (slopeCalc > type(uint128).max) revert InvalidAmount();
-    return uint128(slopeCalc);
-} 
-
-    function _updateWeightedSupply(
-    uint128 oldAmount,
-    uint128 oldMultiplier,
-    uint128 newAmount,
-    uint128 newMultiplier
-) internal {
-    uint256 oldWeighted = (uint256(oldAmount) * oldMultiplier) / PRECISION;
-    uint256 newWeighted = (uint256(newAmount) * newMultiplier) / PRECISION;
-    if (newWeighted < oldWeighted) revert ArithmeticError();
-    _totalWeightedSupply = _totalWeightedSupply - uint128(oldWeighted) + uint128(newWeighted);
-}
+        // Calculate bias like veRAM
+        uint256 bias = uint256(slope) * duration;
+        
+        // Convert to multiplier (1x-4x range)
+        uint256 multiplier = BASE_MULTIPLIER + 
+            ((bias * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / (uint256(slope) * MAXTIME));
+        
+        if (multiplier > MAX_MULTIPLIER) return MAX_MULTIPLIER;
+        if (multiplier < BASE_MULTIPLIER) return BASE_MULTIPLIER;
+        
+        return uint128(multiplier);
+    }
 
     function merge(
         uint256[] calldata tokenIds,
@@ -739,7 +749,7 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
             _userLockCount[msg.sender]--;
         }
         
-        i_lockedToken.safeTransfer(msg.sender, amount);
+        _lockedToken.safeTransfer(msg.sender, amount);
         
         emit EmergencyWithdraw(msg.sender, tokenId, amount);
     }
@@ -753,8 +763,8 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
         return _userLockCount[user];
     }
 
-    function lockedToken() external view returns (IERC20) { 
-        return i_lockedToken;
+    function lockedToken() external view returns (IERC20Upgradeable) { 
+        return _lockedToken;
     }
 
     function isEmergencyMode() external view returns (bool) {
@@ -764,6 +774,8 @@ contract VeSix is ERC721, ReentrancyGuard, Pausable, Ownable {
     function totalWeightedSupply() external view returns (uint128) {
         return _totalWeightedSupply;
     }
+
+    
 
     function setArtProxy(address _artProxy) external onlyOwner {
     if (_artProxy == address(0)) revert ZeroAddress();
@@ -804,43 +816,86 @@ function getExpectedMultiplier(uint128 amount, uint32 duration) public pure retu
     if (duration == 0 || duration > MAXTIME) revert InvalidDuration();
     if (amount == 0) revert InvalidAmount();
     
-    // Calculate slope with safe math
-    uint256 slopeCalc = (uint256(amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
-    if (slopeCalc > type(uint128).max) revert InvalidAmount();
-    uint128 slope = uint128(slopeCalc);
-    
-    // Calculate multiplier
-    uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * duration));
-    if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
-    if (multiplier < BASE_MULTIPLIER) revert InvalidMultiplier();
-    
-    return multiplier;
+    uint128 slope = _calculateNewSlope(amount);
+    return _calculateMultiplier(slope, duration);
 }
 
-// Add a new helper function to calculate expected multiplier for lock extensions
 function getExpectedExtendedMultiplier(uint256 tokenId, uint32 additionalDuration) public view returns (uint128) {
     if (additionalDuration == 0) revert InvalidDuration();
     
     LockPosition memory lock = _locks[tokenId];
     if (lock.amount == 0) revert LockNotExists();
     
-    // Calculate new end time
     uint32 newEndTime = lock.endTime + additionalDuration;
     uint32 remainingDuration = newEndTime - uint32(block.timestamp);
-    
     if (remainingDuration > MAXTIME) revert InvalidDuration();
     
-    // Calculate slope
-    uint256 slopeCalc = (uint256(lock.amount) * (MAX_MULTIPLIER - BASE_MULTIPLIER)) / MAXTIME;
-    if (slopeCalc > type(uint128).max) revert InvalidAmount();
-    uint128 slope = uint128(slopeCalc);
-    
-    // Calculate multiplier based on total remaining duration
-    uint128 multiplier = uint128(BASE_MULTIPLIER + (uint256(slope) * remainingDuration));
-    if (multiplier > MAX_MULTIPLIER) revert MultiplierTooHigh();
-    if (multiplier < BASE_MULTIPLIER) revert InvalidMultiplier();
-    
-    return multiplier;
+    uint128 slope = _calculateNewSlope(lock.amount);
+    return _calculateMultiplier(slope, remainingDuration);
 }
+
+function adminRecalculateWeightedSupply(uint256 startId, uint256 endId) external onlyOwner {
+    if (endId > _nextTokenId) {
+        endId = _nextTokenId;
+    }
+    
+    uint128 newWeightedSupply = 0;
+    int128 totalBias = 0;
+    int128 totalSlope = 0;
+    
+    uint32 currentTime = uint32(block.timestamp);
+    uint32 currentBlock = uint32(block.number);
+    
+    for (uint256 tokenId = startId; tokenId < endId; tokenId++) {
+        if (_ownerOf(tokenId) == address(0)) continue;
+        
+        LockPosition memory lock = _locks[tokenId];
+        if (lock.amount == 0 || currentTime >= lock.endTime) continue;
+        
+        // Calculate slope and bias for this position
+        uint32 remainingDuration = lock.endTime - currentTime;
+        (uint128 slope, uint128 multiplier) = _calculateLockParameters(lock.amount, remainingDuration, 0);
+        
+        uint256 bias = uint256(slope) * uint256(remainingDuration);
+        
+        totalBias += int128(uint128(bias));
+        totalSlope += int128(slope);
+        
+        // Update weighted supply calculation
+        uint256 weightedAmount = (uint256(lock.amount) * uint256(multiplier)) / PRECISION;
+        if (weightedAmount > type(uint128).max) continue;
+        newWeightedSupply += uint128(weightedAmount);
+        
+        // Update user point history
+        Point memory userPoint = Point({
+            bias: int128(uint128(bias)),
+            slope: int128(slope),
+            ts: currentTime,
+            blk: currentBlock
+        });
+        userPointEpoch[tokenId]++;
+        userPointHistory[tokenId][userPointEpoch[tokenId]] = userPoint;
+    }
+    
+    // Create new point with correct bias and slope
+    Point memory newPoint = Point({
+        bias: totalBias,
+        slope: totalSlope,
+        ts: currentTime,
+        blk: currentBlock
+    });
+    
+    // Update point history
+    epoch++;
+    pointHistory[epoch] = newPoint;
+    _totalWeightedSupply = newWeightedSupply;
+    
+   
 }
+
+
+}
+
+
+
 
