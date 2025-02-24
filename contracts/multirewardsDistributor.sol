@@ -142,24 +142,25 @@ contract VeSixRewardDistributor is Initializable, ReentrancyGuardUpgradeable {
 
 
     modifier updateReward(uint256 tokenId) {
-        uint256 veSupply = getTotalSupply();
-        if (veSupply == 0 && veSix.epoch() > 0) revert InvalidVeSupply();
+    uint256 veSupply = getTotalSupply();
+    if (veSupply == 0 && veSix.epoch() > 0) revert InvalidVeSupply();
+    
+    for(uint i = 0; i < rewardTokens.length; i++) {
+        address token = rewardTokens[i];
+        Reward storage reward = rewardData[token];
         
-        for(uint i = 0; i < rewardTokens.length; i++) {
-            address token = rewardTokens[i];
-            Reward storage reward = rewardData[token];
+        reward.lastUpdateTime = lastTimeRewardApplicable(token);
+        reward.lastTotalSupply = veSupply;
+        
+        if (tokenId != 0) {
+            rewards[token][tokenId] = earned(tokenId, token);
             
-            reward.rewardPerVeTokenStored = _calculateRewardPerToken(token, veSupply);
-            reward.lastUpdateTime = lastTimeRewardApplicable(token);
-            reward.lastTotalSupply = veSupply;
+               
             
-            if (tokenId != 0) {
-                rewards[token][tokenId] = earned(tokenId, token);
-                userRewardPerTokenPaid[token][tokenId] = reward.rewardPerVeTokenStored;
-            }
         }
-        _;
     }
+    _;
+}
 
     function lastTimeRewardApplicable(address _rewardsToken) public view returns (uint256) {
         return block.timestamp < rewardData[_rewardsToken].periodFinish ? 
@@ -184,23 +185,22 @@ contract VeSixRewardDistributor is Initializable, ReentrancyGuardUpgradeable {
         // Add to existing cumulative rewardPerToken
         return reward.rewardPerVeTokenStored + additionalRewardPerToken;
     }
-    function earned(uint256 tokenId, address _rewardsToken) public view returns (uint256) {
+      function earned(uint256 tokenId, address _rewardsToken) public view returns (uint256) {
         if (!isRewardToken[_rewardsToken]) return 0;
         
         Reward memory reward = rewardData[_rewardsToken];
         if (reward.lastUpdateTime == 0) return 0;
         
-        // Convert to uint32 for VeSix
         uint32 epochTimestamp = uint32((reward.lastUpdateTime / 3600) * 3600);
         uint256 balance = veSix.getFarmingPower(tokenId, epochTimestamp);
         if (balance == 0) return rewards[_rewardsToken][tokenId];
         
-        // Rest of function remains the same
         uint256 currentRewardPerToken = reward.rewardPerVeTokenStored;
         uint256 userPaid = userRewardPerTokenPaid[_rewardsToken][tokenId];
         uint256 rewardDelta = currentRewardPerToken >= userPaid ? 
             currentRewardPerToken - userPaid : 0;
         
+        // Single precision division instead of double
         uint256 pendingReward = (balance * rewardDelta) / PRECISION;
         return rewards[_rewardsToken][tokenId] + pendingReward;
     }
@@ -283,7 +283,7 @@ contract VeSixRewardDistributor is Initializable, ReentrancyGuardUpgradeable {
     }
 
     function claim(uint256 tokenId) public nonReentrant updateReward(tokenId) {
-        if (msg.sender != veSix.ownerOf(tokenId)) revert Unauthorized();
+        if (veSix.ownerOf(tokenId) != msg.sender) revert Unauthorized();
         
         bool hasReward;
         address[] memory allTokens = getRewardTokens();
@@ -291,11 +291,11 @@ contract VeSixRewardDistributor is Initializable, ReentrancyGuardUpgradeable {
         for(uint i = 0; i < allTokens.length; i++) {
             address token = allTokens[i];
             
-            // Active rewards
             uint256 activeReward = earned(tokenId, token);
             if (activeReward > 0) {
                 hasReward = true;
                 rewards[token][tokenId] = 0;
+                userRewardPerTokenPaid[token][tokenId] = rewardData[token].rewardPerVeTokenStored;
                 _safeTransferReward(token, msg.sender, activeReward, tokenId, rewardData[token].periodId);
             }
             
@@ -406,6 +406,8 @@ contract VeSixRewardDistributor is Initializable, ReentrancyGuardUpgradeable {
     }
     
     
-
+    function getProxyCaller() external view returns (address) {
+    return msg.sender;  
 }
 
+}
