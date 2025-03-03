@@ -1,4 +1,3 @@
-
 // SPDX-License-Identifier: MIT
 
 //@author 0xPhant0m based on Ohm Bond Depository and Bond Protocol
@@ -67,13 +66,12 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
 
     struct Bond {
         address tokenBonded; //token to be distributed
-        uint256 amountOwed; //amount of tokens owed to Bonder
+        uint256 initialAmount; //Total initial amount of the bond
+        uint256 amountOwed; //amount of tokens still owed to Bonder
         uint256 pricePaid; //price paid in PayoutToken
         uint256 marketId; //Which market does this belong
         uint32 startTime; // block timestamp
         uint32 endTime; //timestamp
-
-
     }
 
       struct Adjust {
@@ -254,22 +252,36 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
   function redeem(uint256 _id, address user) external nonReentrant returns (uint256 amountRedeemed) {
     uint256 length = bondInfo[user].length; 
     uint256 totalRedeemed = 0; 
-
+    
+    // First pass: calculate total amount to redeem
+    for (uint256 i = 0; i < length; i++) {
+        Bond memory currentBond = bondInfo[user][i];
+        if (currentBond.marketId == _id) {
+            uint256 amount = calculateLinearPayout(user, i);
+            if (amount > 0) {
+                totalRedeemed += amount;
+            }
+        }
+    }
+    
+    if (totalRedeemed == 0) return 0;
+    
+    // Transfer total amount
+    IERC20(terms[_id].payoutToken).safeTransfer(user, totalRedeemed);
+    
+    // Second pass: update bond records
+    // We iterate backwards to safely remove items from array
     for (uint256 i = length; i > 0;) {
-        i--;  
-        
+        i--;
         Bond storage currentBond = bondInfo[user][i];
         if (currentBond.marketId == _id) {
             uint256 amount = calculateLinearPayout(user, i);
-            
             if (amount > 0) {
-                bondInfo[user][i].amountOwed -= amount;
-                totalRedeemed += amount;
+                currentBond.amountOwed -= amount;
                 
-                // Scale amount by token decimals for transfer
-                IERC20(terms[_id].payoutToken).safeTransfer(user, amount);
-                
+                // If bond is fully redeemed, remove it
                 if (currentBond.amountOwed == 0) {
+                    // Move the last item to this position and remove the last item
                     if (i != bondInfo[user].length - 1) {
                         bondInfo[user][i] = bondInfo[user][bondInfo[user].length - 1];
                     }
@@ -395,35 +407,37 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     }
 
     function calculateLinearPayout(address user, uint256 _bondId) public view returns (uint256) {
-    Bond memory bond = bondInfo[user][_bondId];
-    Terms memory term = terms[bond.marketId];
-
-    // Check if bond is active
-    if (block.timestamp < bond.startTime) {
+        Bond memory bond = bondInfo[user][_bondId];
+        
+        // No payout if bond doesn't exist or nothing is owed
+        if (bond.amountOwed == 0) return 0;
+        
+        // If bond is fully matured, return all remaining owed amount
+        if (block.timestamp >= bond.endTime) {
+            return bond.amountOwed;
+        }
+        
+        // For active bonds, calculate linear vesting
+        // Calculate what percentage of time has elapsed (in 1e18 precision)
+        uint256 totalVestingDuration = bond.endTime - bond.startTime;
+        uint256 timeElapsed = block.timestamp - bond.startTime;
+        
+        // Calculate what percentage is vested so far (with 1e18 precision)
+        uint256 percentVested = (timeElapsed * 1e18) / totalVestingDuration;
+        
+        // Calculate total amount that should be vested by now
+        uint256 totalAmountEarned = (percentVested * (bond.initialAmount)) / 1e18;
+        
+        // Calculate amount already claimed
+        uint256 alreadyClaimed = bond.initialAmount - bond.amountOwed;
+        
+        // Calculate what can be claimed now
+        if (totalAmountEarned > alreadyClaimed) {
+            return totalAmountEarned - alreadyClaimed;
+        }
+        
         return 0;
     }
-
-    // Calculate total vesting duration
-    uint256 vestingTerm = term.vestingTerm;
-
-    // Calculate time elapsed since bond start
-    uint256 timeElapsed = block.timestamp > bond.endTime 
-        ? vestingTerm 
-        : block.timestamp - bond.startTime;
-
-    // Calculate tokens per second
-    uint256 tokensPerSecond = bond.amountOwed / vestingTerm;
-
-    // Calculate current claimable amount
-    uint256 currentClaimable = tokensPerSecond * timeElapsed;
-
-    // Ensure we don't claim more than the total owed
-    if (currentClaimable > bond.amountOwed) {
-        currentClaimable = bond.amountOwed;
-    }
-
-    return currentClaimable;
-}
 
 
     function getBondMarketInfo(uint256 marketId) public view returns (BondMarketInfo memory) {
@@ -473,9 +487,12 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     uint256 timeSinceLastDecay = block.timestamp - term.lastDecay;
     if (timeSinceLastDecay == 0) return;
 
+    // Calculate decay as a proportion of time elapsed relative to vesting term
+    // Scale by 1% to ensure reasonable decay rate (100 = 1% constant)
+    uint256 decayRate = 100; // 1% coefficient for controlled decay
+    uint256 decay = (currentDebt * timeSinceLastDecay) / (term.vestingTerm * decayRate); 
     
-    uint256 decay = (currentDebt * timeSinceLastDecay) / (term.vestingTerm * 100); 
-    
+    // Ensure we don't decay more than current debt
     term.totalDebt = decay > currentDebt ? 0 : currentDebt - decay;
     term.lastDecay = uint32(block.timestamp);
 }
@@ -515,22 +532,36 @@ contract BondDepository is AccessControlEnumerable, ReentrancyGuard {
     uint256 currentCV = _currentControlVariable(_id);
     uint256 debtRatio = _debtRatio(_id);
     
-    // Scale up before division to maintain precision
-    // Use a higher precision factor (1e36) to prevent overflow while maintaining precision
-    uint256 scaledPrice = (currentCV * debtRatio) * (10 ** (36 - payoutDecimals - quoteDecimals));
+    // Early check for potential overflow
+    if (currentCV > type(uint256).max / debtRatio) {
+        return term.minimumPrice;
+    }
     
-    // Perform division last to minimize precision loss
-    // Divide by 1e18 twice because debtRatio is scaled by 1e18 and we want final precision of 1e18
-    price = scaledPrice / 1e18 / 1e18;
+    // Calculate base price with proper scaling
+    uint256 rawPrice = currentCV * debtRatio;
     
-    // Apply minimum price check after all calculations
+    // Apply decimal adjustments
+    int8 decimalAdjustment = int8(36) - int8(payoutDecimals) - int8(quoteDecimals);
+    
+    if (decimalAdjustment > 0) {
+        // Scale up if needed
+        rawPrice = rawPrice * (10 ** uint8(decimalAdjustment));
+    }
+    
+    // Divide by 1e18 twice due to debtRatio scaling
+    price = rawPrice / 1e18 / 1e18;
+    
+    // Apply minimum price floor
     if (price < term.minimumPrice) {
         price = term.minimumPrice;
     }
     
-    // Add safety check for maximum price to prevent unreasonable values
-    // This value should be adjusted based on your specific needs
-    require(price <= type(uint256).max / 1e18, "Price overflow");
+    // Final overflow guard
+    if (price > type(uint256).max / 1e18) {
+        price = type(uint256).max / 1e18;
+    }
+    
+    return price;
 }
 
         
